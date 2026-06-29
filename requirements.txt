@@ -1,0 +1,16 @@
+transformers
+datasets
+evaluate
+seqeval
+torch
+accelerate
+numpy
+
+gliner
+
+langchain
+langchain-core
+langchain-community
+langchain-groq
+groq
+python-dotenv
