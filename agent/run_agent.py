@@ -111,6 +111,8 @@ def main():
     write_canonical(
         os.path.join(args.output_dir, "gold_test.json"), gold_all
     )
+    
+    workflow.save_stats(output_dir=os.path.join(args.output_dir, "branch_analysis"))
 
     score = strict_prf(preds_by_doc, gold_all)
     with open(os.path.join(args.output_dir, "test_strict_metrics.json"), "w") as f:
