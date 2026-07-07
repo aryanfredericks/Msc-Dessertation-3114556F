@@ -49,6 +49,11 @@ class AgentWorkflow:
         
         self.graph = self._build_graph()
 
+    def save_graph_diagram(self, path: str = "graph.png") -> None:
+        png_bytes = self.graph.get_graph().draw_mermaid_png()
+        with open(path, "wb") as f:
+            f.write(png_bytes)
+        print(f"[graph] diagram saved to {path}")
 
     def span_extraction_node(self, state: NERAgentState) -> dict:
         doc_id = state["doc_id"]
