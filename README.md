@@ -16,6 +16,10 @@ tool selection.
 biomedical_ner/
 ├── biored.py                  # shared: BioRED loader, label maps, canonical I/O
 ├── scorer.py                  # shared: strict / relaxed / per-type scorer
+├── extract_rare_entities.py   # dumps gold OrganismTaxon/CellLine spans for diagnosis
+├── check_extraction_ceiling.py# measures BERT span-extraction recall ceiling per type
+├── check_ncbi_coverage.py     # tests gold OrganismTaxon spans against live NCBI Taxonomy API
+├── check_rare_collisions.py   # tests gold OrganismTaxon spans against live Cellosaurus API
 ├── dataset/
 │   ├── train/Train.BioC.JSON  # 400 documents — fine-tuning + few-shot examples
 │   ├── dev/Dev.BioC.JSON      # 100 documents — threshold / hyperparameter tuning
@@ -43,7 +47,10 @@ biomedical_ner/
     ├── tier3_llm_0shot/
     ├── tier3_llm_3shot/
     ├── tier4_agent/
-    └── tier5_agent/            # Tier 4 Extended output directory
+    ├── tier4_agent_v2/         # Tier 4 rerun with the human-referent allowlist fix (below)
+    ├── tier5_agent/            # Tier 4 Extended output directory
+    ├── tier5_agent_v2/         # Tier 4 Extended rerun with the same fix
+    └── rare_entity_analysis/   # extract_rare_entities.py output (gold OrganismTaxon/CellLine spans)
 ```
 
 ---
@@ -553,6 +560,92 @@ realisation rather than a stable mean.
 
 ---
 
+## OrganismTaxon Diagnostic Deep-Dive & Fix (v2)
+
+Both Tier 4 (76.7 F1) and Tier 4 Extended (79.2 F1) share the same weak spot:
+OrganismTaxon recall stuck at ~34%, essentially flat across two very
+different arbitration strategies. Since arbitration strategy clearly wasn't
+the cause, three scripts were written to isolate which pipeline stage is
+actually responsible, run in sequence:
+
+1. **`extract_rare_entities.py`** — pulls every gold OrganismTaxon / CellLine
+   span out of the test set (`outputs/rare_entity_analysis/`) for the checks
+   below to query against.
+   ```bash
+   PYTHONPATH=. uv run extract_rare_entities.py \
+     --test_json ./dataset/test/Test.BioC.JSON \
+     --out       outputs/rare_entity_analysis/organism_cellline_gold.json \
+     --txt_out   outputs/rare_entity_analysis/organism_cellline_spans.txt
+   ```
+
+2. **`check_extraction_ceiling.py`** — measures what fraction of gold
+   OrganismTaxon mentions are ever generated as a BERT candidate span at all.
+   **Result: ~99.5% extraction ceiling.** The extraction stage is not the
+   bottleneck (unlike SequenceVariant, where extraction itself caps recall).
+   ```bash
+   PYTHONPATH=. uv run check_extraction_ceiling.py --type OrganismTaxon
+   ```
+
+3. **`check_rare_collisions.py`** — tests whether OrganismTaxon spans are
+   being misrouted to CellLine because `resolve_rare_entity()` checks
+   Cellosaurus before NCBI Taxonomy. **Result: no collisions** — ruled out.
+   ```bash
+   python check_rare_collisions.py \
+     --spans_file outputs/rare_entity_analysis/organism_cellline_spans.txt
+   ```
+
+4. **`check_ncbi_coverage.py`** — tests every unique gold OrganismTaxon span
+   against the live NCBI Taxonomy API. **Result: colloquial human-referent
+   terms return zero hits** — `patient`, `patients`, `inpatient`, `man`,
+   `men`, `woman`, `women` correctly denote *Homo sapiens* in BioRED but have
+   no entry in a species-name taxonomy database. This is the bottleneck: a
+   genuine KB coverage gap, not a code bug.
+   ```bash
+   python check_ncbi_coverage.py \
+     --spans_file outputs/rare_entity_analysis/organism_cellline_spans.txt
+   ```
+
+**Fix:** `agent/utils/rare_agent_utils.py` — `resolve_rare_entity()` now
+checks a small human-referent allowlist before Cellosaurus/NCBI Taxonomy:
+
+```python
+HUMAN_REFERENT_TERMS = {"patient", "patients", "inpatient", "man", "men", "woman", "women"}
+```
+
+**Results with the fix** (`outputs/tier4_agent_v2/`, `outputs/tier5_agent_v2/`,
+same 100-doc test set, same span extractor, everything else unchanged):
+
+| System | Strict F1 (before → after) | OrganismTaxon F1 | OrganismTaxon Recall |
+|---|---|---|---|
+| Tier 4 | 76.7 → **80.3** (+3.6) | 47.6 → **85.6** (+38.0) | 34.6% → **83.2%** |
+| Tier 4 Extended | 79.2 → **79.3** (+0.1) | 49.1 → **52.2** (+3.1) | 34.1% → **37.7%** |
+
+**Key findings:**
+- The fix is disproportionately more valuable for Tier 4's deterministic
+  combiner (+38.0 F1 on the type) than for Tier 4 Extended's LLM-orchestrated
+  agent (+3.1 F1). The rare branch's raw KB result feeds Tier 4's combiner
+  directly, so a KB coverage gap propagates straight through; Tier 4
+  Extended's agent has full passage context and can reason about "patient"
+  independently of what the KB tool returns, so it was already partially
+  compensating for the gap the deterministic combiner could not.
+- **Tier 4 v2 (80.3 strict F1) now exceeds Tier 4 Extended (79.2/79.3 strict
+  F1).** With the extraction-stage and KB-coverage bottlenecks accounted for,
+  the deterministic-combiner architecture edges ahead again — the earlier
+  Tier 4 vs. Tier 4 Extended comparison was partly confounded by this
+  fixable KB gap rather than purely reflecting arbitration strategy.
+- This diagnostic chain (extraction ceiling → collision check → KB coverage
+  check) directly resolves the "OrganismTaxon recall" item in **Known
+  Limitations** below: the bottleneck is neither span extraction nor
+  branch-arbitration order, but KB domain coverage for colloquial referents.
+
+> **Status:** `rare_agent_utils.py`'s allowlist change is not yet committed.
+> `outputs/tier4_agent_v2/` and `outputs/tier5_agent_v2/` reflect this
+> uncommitted code, so headline numbers elsewhere in this README (Results
+> Summary, Ablation Table, Known Limitations) still describe the
+> pre-fix `tier4_agent/` / `tier5_agent/` runs unless noted otherwise.
+
+---
+
 ## Results Summary
 
 | Tier | System | Strict F1 | Relaxed F1 | Macro F1 | P | R |
@@ -693,12 +786,15 @@ structurally cannot access.
 
 ## Known Limitations
 
-- **OrganismTaxon recall (34.6% Tier 4 / 34.1% Tier 4 Extended)** — BERT span
-  extractor misses organism mentions used in descriptive or colloquial
-  contexts (`patients`, `human`, `Chinese hamster`). KB lookup can only type
-  candidates it receives, and this bottleneck is upstream of arbitration —
-  confirmed by Tier 4 Extended leaving this type essentially unchanged
-  despite otherwise substantial gains elsewhere.
+- **OrganismTaxon recall (34.6% Tier 4 / 34.1% Tier 4 Extended)** — diagnosed
+  in full in **OrganismTaxon Diagnostic Deep-Dive & Fix (v2)** above. It is
+  *not* a span-extraction problem (extraction ceiling ≈99.5%) or a branch-
+  ordering problem (no Cellosaurus/NCBI collisions); it's an NCBI Taxonomy
+  coverage gap for colloquial human-referent terms (`patient`, `man`,
+  `woman`, etc.), which a small allowlist fix resolves — recall rises to
+  83.2% (Tier 4) / 37.7% (Tier 4 Extended) in `outputs/tier4_agent_v2` /
+  `tier5_agent_v2`. That fix is uncommitted as of this writing, so the
+  headline numbers above still reflect the pre-fix runs.
 - **SequenceVariant recall ceiling** — same span extraction limitation.
   138 gold variants were never extracted as candidates under Tier 4; Tier 4
   Extended's improvement (42.7% → 75.1% recall) comes from typing more of

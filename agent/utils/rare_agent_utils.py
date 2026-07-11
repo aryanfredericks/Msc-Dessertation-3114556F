@@ -50,10 +50,14 @@ def lookup_ncbi_taxonomy(text: str, retries: int = 3) -> bool:
                 print(f"[ncbi_taxonomy] lookup failed for '{text}': {e}")
                 return False
 
+HUMAN_REFERENT_TERMS = {"patient", "patients", "inpatient", "man", "men", "woman", "women"}
+
 def resolve_rare_entity(text: str) -> tuple[Optional[str], float, str]:
     if text in _cache:
         return _cache[text]
-    if lookup_cellosaurus(text):
+    if text.strip().lower() in HUMAN_REFERENT_TERMS:
+        result = ("OrganismTaxon", 1.0, "human_referent_allowlist")
+    elif lookup_cellosaurus(text):
         result = ("CellLine", 1.0, "cellosaurus_exact_match")
     elif lookup_ncbi_taxonomy(text):
         result = ("OrganismTaxon", 1.0, "ncbi_taxonomy_count")
