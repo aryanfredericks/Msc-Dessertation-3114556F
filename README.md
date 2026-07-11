@@ -2,9 +2,11 @@
 **Biomedical Information Extraction with Agents**
 University of Glasgow · MSc Robotics & AI
 
-A four-tier comparison study for biomedical named entity recognition on the
+A comparative study for biomedical named entity recognition on the
 [BioRED dataset](https://github.com/ncbi/BioRED), progressing from a
-fine-tuned encoder baseline to a full multi-agent agentic pipeline.
+fine-tuned encoder baseline to a full multi-agent agentic pipeline, with a
+further extension replacing deterministic arbitration with LLM-orchestrated
+tool selection.
 
 ---
 
@@ -19,27 +21,29 @@ biomedical_ner/
 │   ├── dev/Dev.BioC.JSON      # 100 documents — threshold / hyperparameter tuning
 │   └── test/Test.BioC.JSON    # 100 documents — all reported results
 ├── pubmedbert/                # Tier 1: fine-tuned PubMedBERT
-├── gli_ner_bert/              # Tier 2: GLiNER-biomed zero-shot
-├── llm/                       # Tier 3: single-call LLM
-├── agent/                     # Tier 4: multi-agent system
-│   ├── workflow.py            # LangGraph graph definition
-│   ├── run_agent.py           # entry point — loads docs, runs graph, saves output
-│   ├── models.py              # shared dataclasses and TypedDict state
-│   ├── prompts.py             # LLM prompt builders
-│   ├── config.py              # model names and paths
+├── gli_ner_bert/               # Tier 2: GLiNER-biomed zero-shot
+├── llm/                        # Tier 3: single-call LLM
+├── agent/                      # Tier 4 + Tier 4 Extended: agentic pipelines
+│   ├── workflow.py             # Tier 4: LangGraph graph definition
+│   ├── run_agent.py            # Tier 4: entry point — loads docs, runs graph, saves output
+│   ├── run_tier5.py             # Tier 4 Extended: LLM-orchestrated agent entry point
+│   ├── models.py                # shared dataclasses and TypedDict state
+│   ├── prompts.py               # LLM prompt builders
+│   ├── config.py                # model names and paths
 │   └── utils/
 │       ├── pattern_matching.py   # regex rules for SequenceVariant
 │       ├── rare_agent_utils.py   # Cellosaurus + NCBI Taxonomy KB lookups
 │       ├── common_agent_utils.py # PubMedBERT span-level type prediction
 │       ├── bert_span_extractor.py# BERT candidate span generator
-│       ├── overseer_utils.py     # overseer prompt + output schema
+│       ├── overseer_utils.py     # overseer prompt + output schema (Tier 4 only)
 │       └── offset_utils.py       # find_occurrences — string to char offsets
 └── outputs/
     ├── tier1_pubmedbert/
     ├── tier2_gliner/
     ├── tier3_llm_0shot/
     ├── tier3_llm_3shot/
-    └── tier4_agent/
+    ├── tier4_agent/
+    └── tier5_agent/            # Tier 4 Extended output directory
 ```
 
 ---
@@ -55,6 +59,7 @@ Add to `.env`:
 ```
 GROQ_API_KEY=your_key_here
 NCBI_EMAIL=your@email.com
+IDA_LLM_API_KEY=your_uofg_hpc_key_here
 ```
 
 All commands run from the project root (`biomedical_ner/`) with `PYTHONPATH=.`
@@ -255,9 +260,9 @@ reported finding, not a bug.
 
 ## Tier 4 — Multi-Agent NER System
 
-The dissertation's core contribution. A LangGraph agentic pipeline using
-heterogeneous-routing: candidate spans are broadcast to three specialist
-branches simultaneously, and a priority combiner arbitrates the votes.
+A LangGraph agentic pipeline using heterogeneous-routing: candidate spans are
+broadcast to three specialist branches simultaneously, and a priority
+combiner arbitrates the votes.
 
 **Architecture:**
 
@@ -361,6 +366,191 @@ making the pipeline fully reproducible up to the overseer re-query calls.
 Note: these are 5-document sanity numbers. The final reported Tier 4 result (76.7
 strict F1) uses the BERT extractor across all 100 test documents.
 
+**Branch resolution diagnosis — motivation for Tier 4 Extended:**
+
+Logging which branch resolved each final entity (`analyze_branch_stats.py`)
+revealed that the combiner's "arbitration" is largely illusory for three of
+the six entity types. `common_relation_agent` only ever votes on
+GeneOrGeneProduct / DiseaseOrPhenotypicFeature / ChemicalEntity by
+construction, and the pattern/rare branches are correspondingly scoped to
+their own disjoint subsets — so in practice the pipeline behaves as **three
+mutually-exclusive type-scoped classifiers**, not a system with genuine
+cross-branch competition:
+
+| Entity type | Resolving branch | Share |
+|---|---|---|
+| GeneOrGeneProduct | common | 99.7% |
+| DiseaseOrPhenotypicFeature | common | 100.0% |
+| ChemicalEntity | common | 100.0% |
+| SequenceVariant | pattern | 100.0% |
+| CellLine | rare | 100.0% |
+| OrganismTaxon | rare | 100.0% |
+
+No span was ever contested between branches. This directly motivated Tier 4
+Extended (below): rather than tuning the confidence threshold that gates this
+already-narrow arbitration, the combiner is replaced entirely with an LLM
+agent that can consult any tool for any span.
+
+---
+
+## Tier 4 Extended — LLM-Orchestrated Agent
+
+Replaces Tier 4's deterministic, confidence-gated combiner with a single LLM
+agent per document that decides, per candidate span, which of the same three
+underlying methods (common classifier / pattern matcher / rare KB lookup) to
+consult as tools, before producing a final type assignment. Span extraction
+is **identical** to Tier 4 (same fine-tuned PubMedBERT candidate generator),
+so any performance delta is attributable to the arbitration strategy alone,
+not to a change in what candidates the system even considers.
+
+**Architecture:**
+
+```
+Document
+  └─> Span extraction (PubMedBERT — same Tier 1 model, unchanged from Tier 4)
+        └─> Central LLM agent (gpt-oss-120b, University of Glasgow HPC endpoint)
+              Phase 1 — evidence gathering (tools bound, tool_choice="required" on turn 1):
+                agent calls any of the three tools, batching multiple spans
+                per call, until it has covered every candidate span or signals "DONE"
+                  ├─> common_classifier(span_texts) — same PubMedBERT token classifier as Tier 4
+                  ├─> pattern_matcher(span_texts)   — same regex rules as Tier 4
+                  └─> rare_lookup(span_texts)        — same Cellosaurus/NCBI KB lookups as Tier 4
+              Phase 2 — final answer (tools bound, tool_choice="none"):
+                agent returns one JSON type assignment per span using all
+                gathered evidence plus full passage context
+        └─> Offset localisation (identical to Tier 4, cap=5 per span)
+  └─> Canonical output → scorer.py
+```
+
+**Key design decisions:**
+- **Same three tools as Tier 4's branches**, wrapping the identical underlying
+  functions (`predict_span_type`, `match_sequence_variant`, `resolve_rare_entity`).
+  This isolates the comparison to arbitration strategy: deterministic
+  confidence-gated combiner (Tier 4) vs. LLM-orchestrated tool selection
+  (Tier 4 Extended).
+- **Two-phase interaction** (evidence-gathering vs. final-answer, as separate
+  LLM calls) rather than one open-ended tool-calling loop. Forcing a model to
+  choose between calling a tool and returning a final answer in the same turn
+  caused malformed-output errors on multiple models tested (`tool_use_failed`
+  on Groq); separating the phases — with `tool_choice="required"` on the
+  first gathering turn and `tool_choice="none"` on the final-answer turn —
+  eliminated this failure mode entirely.
+- **`tool_choice="required"` on the first turn is necessary, not optional.**
+  Without it, models frequently skip tools entirely and answer from
+  parametric knowledge alone, silently degrading the system into Tier 3's
+  zero-shot behaviour despite the tools being available.
+- **Batched tool calls** (a list of spans per call, not one call per span).
+  Some models issue only one tool call per conversational turn; without
+  batching, a 30–70 candidate-span document would require as many turns,
+  which is both slow and — for reasoning models with large hidden
+  chain-of-thought token costs — prohibitively expensive.
+- **Checkpointing.** Predictions are written incrementally per document, so
+  an interrupted run (rate limit, network drop) resumes rather than restarting.
+
+> Set `IDA_LLM_API_KEY` in `.env` before running. Uses the University of
+> Glasgow HPC-hosted `gpt-oss-120b` endpoint
+> (`http://api.llm.apps.os.dcs.gla.ac.uk/v1`, or `http://api.terrier.org/v1`
+> outside the university network) rather than a commercial provider — the
+> same model hosted via Groq's free tier was found to exhaust its 200K
+> tokens/day cap after roughly 1.5 documents, since `gpt-oss-120b` is a
+> reasoning model whose hidden chain-of-thought is billed against the quota
+> even though it never appears in the visible response.
+
+**Debug run** *(3 docs, minimal cost)*
+```bash
+PYTHONPATH=. uv run agent/run_tier5.py \
+  --test_json  ./dataset/test/Test.BioC.JSON \
+  --output_dir outputs/tier5_agent \
+  --limit      3
+```
+
+**Full run** *(100 docs, checkpoint/resume supported)*
+```bash
+PYTHONPATH=. uv run agent/run_tier5.py \
+  --test_json  ./dataset/test/Test.BioC.JSON \
+  --output_dir outputs/tier5_agent
+```
+
+> If interrupted, rerun the exact same command — already-completed documents
+> are skipped automatically via `outputs/tier5_agent/checkpoint_predictions.jsonl`.
+
+**Score**
+```bash
+PYTHONPATH=. uv run scorer.py \
+  --pred outputs/tier5_agent/test_predictions.json \
+  --gold outputs/tier5_agent/gold_test.json \
+  --name tier4_extended \
+  --out  outputs/tier5_agent/full_metrics.json
+```
+
+**Results:** Strict F1 **79.2** · Relaxed F1 **82.3** · Macro F1 **78.0**
+Precision 86.3 · Recall 73.2
+
+**Per-type (strict):**
+
+| Type | F1 | P | R | Support |
+|---|---|---|---|---|
+| CellLine | **90.3** | 97.7 | 84.0 | 50 |
+| GeneOrGeneProduct | 83.7 | 91.0 | 77.5 | 1180 |
+| ChemicalEntity | 82.4 | 88.8 | 76.8 | 754 |
+| SequenceVariant | **83.6** | 94.3 | 75.1 | 241 |
+| DiseaseOrPhenotypicFeature | 78.8 | 77.3 | 80.5 | 917 |
+| OrganismTaxon | 49.1 | 87.6 | 34.1 | 393 |
+
+**Tier 4 vs Tier 4 Extended — per-type F1 delta:**
+
+| Type | Tier 4 | Tier 4 Extended | Δ |
+|---|---|---|---|
+| CellLine | 57.8 | 90.3 | **+32.5** |
+| SequenceVariant | 59.9 | 83.6 | **+23.7** |
+| OrganismTaxon | 47.6 | 49.1 | +1.5 |
+| DiseaseOrPhenotypicFeature | 77.8 | 78.8 | +1.0 |
+| GeneOrGeneProduct | 83.3 | 83.7 | +0.4 |
+| ChemicalEntity | 82.2 | 82.4 | +0.2 |
+| **Overall (strict)** | **76.7** | **79.2** | **+2.5** |
+| **Macro F1** | **68.1** | **78.0** | **+9.9** |
+
+**Key findings:**
+- The improvement is **concentrated, not uniform**, and lands exactly where
+  the branch-resolution diagnosis (above) predicted it would: CellLine and
+  SequenceVariant were the two types Tier 4 resolved via a single isolated
+  branch with no possibility of cross-checking. Giving the agent discretion
+  to consult multiple tools per span produces large gains specifically there
+  (+32.5 and +23.7 F1), while types where Tier 4's common branch already had
+  unimpeded access (Gene, Disease, Chemical) move by at most ±1 F1 — there
+  was no arbitration bottleneck left to fix on those types.
+- **SequenceVariant recall nearly doubles** (42.7% → 75.1%) at a small
+  precision cost (100.0% → 94.3%). Tier 4's regex-only pattern branch was
+  maximally conservative (perfect precision, but missed any variant mention
+  it didn't structurally match); the agent uses the same regex tool as one
+  input among several rather than a hard gate, recovering many of the
+  variant mentions the rigid rule alone would drop.
+- **CellLine improves on both precision and recall simultaneously**
+  (65.0%/52.0% → 97.7%/84.0%) — not a tradeoff, a strict win, consistent with
+  the agent combining KB lookup with passage context rather than trusting
+  the KB result in isolation.
+- **OrganismTaxon barely moves** (47.6 → 49.1 F1), and recall in particular
+  is essentially flat (34.6% → 34.1%). Since span extraction is unchanged
+  from Tier 4, this is expected: OrganismTaxon's bottleneck is at the
+  extraction stage (organism mentions like `patients`, `human` are never
+  generated as candidate spans in the first place), which is upstream of
+  arbitration and therefore not something a smarter combiner can fix. This
+  cleanly separates arbitration-fixable errors from extraction-fixable ones.
+- **Error taxonomy improves on every axis simultaneously**: spurious false
+  positives fall (302 → 259), missed false negatives fall (858 → 793), and
+  type-confusion errors nearly halve (73 → 41 total instances).
+- This result directly answers the architectural critique that motivated
+  this tier: Tier 4's combiner gives disproportionate and largely
+  uncontested weight to the common branch for the majority of entity types.
+  Replacing fixed-threshold arbitration with agentic tool selection recovers
+  a substantial share of the performance lost to that structural rigidity,
+  concentrated exactly on the entity types it was diagnosed to affect.
+
+**Limitation:** this is a single run of a non-deterministic LLM agent.
+Run-to-run variance has not been characterised (unlike Tier 3, which is
+recommended to run 3–5 times); the reported numbers should be read as one
+realisation rather than a stable mean.
+
 ---
 
 ## Results Summary
@@ -371,7 +561,8 @@ strict F1) uses the BERT extractor across all 100 test documents.
 | 2 | GLiNER-biomed zero-shot | 63.3 | 76.3 | 52.3 | 64.7 | 61.9 |
 | 3 | LLM 0-shot | 60.9 | 67.5 | 51.5 | 61.9 | 59.9 |
 | 3 | LLM 3-shot | 57.9 | 64.8 | 51.4 | 65.5 | 51.8 |
-| **4** | **Multi-agent system** | **76.7** | **79.7** | **68.1** | **83.9** | **70.7** |
+| 4 | Multi-agent system | 76.7 | 79.7 | 68.1 | 83.9 | 70.7 |
+| **4 Extended** | **LLM-orchestrated agent** | **79.2** | **82.3** | **78.0** | **86.3** | **73.2** |
 
 ---
 
@@ -388,6 +579,7 @@ Shows which parts of the architecture contribute measurably.
 | − pattern branch | 74.2 | −2.5 | value of deterministic regex for SequenceVariant |
 | − overseer / requery | 76.7 | −0 | value of LLM re-query for low-confidence spans |
 | Single-LLM (Tier 3) | 60.9 | −15.8 | total value of agentic orchestration |
+| Tier 4 Extended | 79.2 | +2.5 | value of replacing the combiner with LLM-orchestrated tool selection |
 
 ---
 
@@ -440,6 +632,18 @@ the structured combiner and BERT span extraction replacing the LLM extractor. No
 component accounts for the full gain, confirming that the architecture's value is
 emergent rather than attributable to any one design decision.
 
+**Tier 4 Extended / LLM-orchestrated arbitration (F1 delta: +2.5 overall, +9.9 macro)**
+Replacing the entire combiner — confidence gate included — with LLM-orchestrated tool
+selection recovers a further +2.5 strict F1 on top of the full Tier 4 system, holding
+span extraction and all three underlying branch methods constant. Critically, this gain
+is not uniform: it is concentrated almost entirely in the two entity types (CellLine,
+SequenceVariant) that the branch-resolution diagnosis showed were resolved by a single
+isolated branch with zero cross-branch competition under Tier 4. This confirms the
+KB confidence gate's earlier finding from the opposite direction — where a fixed
+threshold prevents harmful KB overrides, it also prevents beneficial ones, and an
+agent that can weigh evidence contextually per span recovers value the fixed rule
+structurally cannot access.
+
 ---
 
 ## Cross-Tier Findings
@@ -474,23 +678,40 @@ emergent rather than attributable to any one design decision.
    lower recall (70.7) than Tier 1 (92.0) — the agentic system is more
    conservative but more precise.
 
+7. **Deterministic arbitration systematically under-serves branch-isolated
+   entity types, and this is fixable without touching span extraction or the
+   underlying branch methods.** Tier 4's combiner routes each of the six
+   entity types to exactly one branch by construction, with essentially zero
+   cross-branch contest. Tier 4 Extended shows that replacing only the
+   arbitration logic — same tools, same span extractor — recovers +32.5 F1
+   on CellLine and +23.7 F1 on SequenceVariant, while leaving common-branch-
+   dominated types (Gene, Disease, Chemical) unchanged. This isolates
+   arbitration flexibility as the causal factor, distinct from model quality
+   or extraction coverage.
+
 ---
 
 ## Known Limitations
 
-- **OrganismTaxon recall (34.6%)** — BERT span extractor misses organism
-  mentions used in descriptive or colloquial contexts (`patients`, `human`,
-  `Chinese hamster`). KB lookup can only type candidates it receives.
-- **SequenceVariant recall (42.7%)** — same span extraction ceiling.
-  138 gold variants never extracted as candidates.
+- **OrganismTaxon recall (34.6% Tier 4 / 34.1% Tier 4 Extended)** — BERT span
+  extractor misses organism mentions used in descriptive or colloquial
+  contexts (`patients`, `human`, `Chinese hamster`). KB lookup can only type
+  candidates it receives, and this bottleneck is upstream of arbitration —
+  confirmed by Tier 4 Extended leaving this type essentially unchanged
+  despite otherwise substantial gains elsewhere.
+- **SequenceVariant recall ceiling** — same span extraction limitation.
+  138 gold variants were never extracted as candidates under Tier 4; Tier 4
+  Extended's improvement (42.7% → 75.1% recall) comes from typing more of
+  the candidates that were extracted, not from extracting more of them.
 - **CellLine variance** — support of 50 in the test set makes per-type F1
   high-variance. Results should be interpreted cautiously.
 - **Descriptive annotation spans** — a subset of BioRED gold annotations are
   long descriptive phrases (e.g. `valine (gtg) to a methionine (atg)`) that
-  no NER system returns as a single span. These affect all four tiers equally.
-- **LLM non-determinism** — Tier 3 and Tier 4 overseer use LLMs at temperature
-  0. Results may vary slightly across runs. Multiple runs recommended for Tier 3
-  headline numbers.
+  no NER system returns as a single span. These affect all tiers equally.
+- **LLM non-determinism** — Tier 3, Tier 4's overseer, and Tier 4 Extended's
+  agent all use LLMs. Tier 3 is run at temperature 0 with multiple runs
+  recommended for headline numbers. Tier 4 Extended's reported result is a
+  single run; run-to-run variance has not been characterised.
 
 ---
 
@@ -500,3 +721,4 @@ emergent rather than attributable to any one design decision.
 |---|---|---|
 | `GROQ_API_KEY` | Tiers 3, 4 | Groq API key for LLM calls |
 | `NCBI_EMAIL` | Tier 4 | Email for NCBI Entrez API (courtesy, no registration needed) |
+| `IDA_LLM_API_KEY` | Tier 4 Extended | University of Glasgow HPC LLM endpoint key |

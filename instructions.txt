@@ -1,0 +1,47 @@
+Writing Your Project Report
+Many of the templates that you are provided with are for engineering-style projects that have requirements capture, a separate design and implementation phase. You can disregard that structure and follow the broad chapter structure outlined below. Don’t feel tied to this and it is only a suggestion. Note that the L5 project report is a short research paper format but would follow similar headings.
+
+Introduction
+Here you provide a brief introduction of what the problem is and why it is important. Keep it high-level. Remember that your reader may have no background in this area
+Talk broadly about the methods that will be explored for the problem
+Background
+This chapter typically has three parts:
+Provide a deep background on the problem and explain some of the concepts. It is essential that the reader knows what you are trying to solve. A figure giving an example of the problem can be invaluable here
+The literature survey: How have others approached the problem? See the notes above about grouping the survey into sections about the broad types of approaches that others have taken.
+Given what you’ve read in the literature survey, what are the opportunities to try out some ideas? Here you should explicitly list out your research questions as bullet points - think RQ1, RQ2, etc. You can then refer back to them in the Results chapter.
+Methods (sometimes called Implementation or Design & Implementation)
+Here you describe how you are going to undertake your experiments
+You may want to describe the dataset that you’ll be using for the project here. It may also be reasonable to talk about it in the background section if it makes sense.
+A figure showing a flow-chart of the main processes of the project (or some other kind of overview figure) can be beneficial here.
+The main part of this chapter is working through the steps of your project with appropriate sections and subsections.
+The general idea is to describe how you did the project in enough detail that someone else (with some knowledge of the area) could re-implement your project
+Things like how you did hyperparameter tuning also goes in here
+Results (sometimes called Evaluation)
+This section should refer directly back to your research questions outlined in Chapter 2
+Have a section for each research question. Include a results figure or table and then discuss what it means
+Conclusion
+Provide a nice summary of what your results mean together
+Discuss any limitations that you face in the project or limitations on how the results may be interpreted (e.g. they may not generalise)
+Discuss any future directions that you would take (given more time)
+
+Tips for Writing
+My policy is to read a single draft and give feedback for each student. You can provide drafts chapter-by-chapter or the whole thing. Just remember to leave enough time so that I can read it, get you feedback and you can do something with the feedback. Ideally a couple weeks before the deadline.
+Your dissertation report will be marked by another academic from the School who may not know much about the area. Be very gentle when you introduce the topic. Clearly describe the motivation and exactly what the problem is.
+Avoid restating numbers from results tables in text. Instead talk about what the results mean, or describe trends that may not be immediately obvious
+Simpler is always better. Simple tables and simple graphs (e.g. barcharts) will make your message clearer.
+Avoid including screenshots of code unless it really provides a useful explanation of the implementation that an alternative doesn’t.
+You may end up with many many graphs during your analysis. Don’t include them all. Each figure should have a clear message (e.g. method A is better than method B). Make it simple and clear.
+Make use of topic sentences when writing. The basic idea is that the first sentence of each paragraph should state the main 
+Writing is a learned skill and we all start off rubbish at it. Editing is key. Give yourself enough time to reread parts of your report and redraft.
+Inverse Chekhov's Gun - Don’t introduce new methods or ideas in a later chapter that have not been suitably introduced and set up earlier
+The And-But-Therefore approach
+This method is invaluable for writing the abstract and introduction of your report (and many future documents). It sets up the problem, the motivation and broadly your approach. The points below outline the three parts with example text.
+
+The AND: A few sentences about the current situation that is relevant to your project.
+e.g. Biomedical machine learning methods promise to revolutionise how diseases are diagnosed and usher in an era of precision medicine. Transformer-based methods are able to integrate knowledge from biomedical texts for this task.
+The BUT: A sentence describing what the problem is. It often starts with “However”. The problem should be fairly severe and can be emphasised with numbers (e.g. $$$ costs, health impact, etc) if available.
+e.g. However, these methods rely on large amounts of annotated data which is infeasible given the high cost of biomedical expert annotators.
+The THEREFORE: A sentence or two that describes your proposal to solve the problem
+e.g. We propose a new method that uses distant supervision to generate high quality annotations with minimal user input.
+
+You can use it directly for an abstract and in a longer form for an introduction
