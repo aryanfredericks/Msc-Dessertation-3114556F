@@ -36,7 +36,7 @@ biomedical_ner/
 │   ├── config.py                # model names and paths
 │   └── utils/
 │       ├── pattern_matching.py   # regex rules for SequenceVariant
-│       ├── rare_agent_utils.py   # Cellosaurus + NCBI Taxonomy KB lookups
+│       ├── rare_agent_utils.py   # Cellosaurus + NCBI Taxonomy KB lookups + human-referent allowlist
 │       ├── common_agent_utils.py # PubMedBERT span-level type prediction
 │       ├── bert_span_extractor.py# BERT candidate span generator
 │       ├── overseer_utils.py     # overseer prompt + output schema (Tier 4 only)
@@ -46,12 +46,18 @@ biomedical_ner/
     ├── tier2_gliner/
     ├── tier3_llm_0shot/
     ├── tier3_llm_3shot/
-    ├── tier4_agent/
-    ├── tier4_agent_v2/         # Tier 4 rerun with the human-referent allowlist fix (below)
-    ├── tier5_agent/            # Tier 4 Extended output directory
-    ├── tier5_agent_v2/         # Tier 4 Extended rerun with the same fix
-    └── rare_entity_analysis/   # extract_rare_entities.py output (gold OrganismTaxon/CellLine spans)
+    ├── tier4_agent/             # Tier 4, pre-fix (kept for the diagnostic before/after comparison)
+    ├── tier4_agent_v2/          # Tier 4, FINAL — with the human-referent allowlist fix
+    ├── tier5_agent/             # Tier 4 Extended, pre-fix
+    ├── tier5_agent_v2/          # Tier 4 Extended, FINAL — with the same fix
+    └── rare_entity_analysis/    # extract_rare_entities.py output (gold OrganismTaxon/CellLine spans)
 ```
+
+> **Reported results throughout this README use the `_v2` (fixed) runs for
+> Tier 4 and Tier 4 Extended.** The pre-fix runs are kept and referenced
+> explicitly in the **OrganismTaxon Diagnostic Deep-Dive & Fix** section,
+> since the diagnostic journey that led to the fix is itself part of the
+> dissertation's contribution.
 
 ---
 
@@ -279,7 +285,7 @@ Document
         └─> broadcast to all three branches in parallel
               ├─> Pattern branch   — regex for SequenceVariant (HGVS, rsIDs, AA substitutions)
               ├─> Common branch    — PubMedBERT token classifier (gene / disease / chemical)
-              └─> Rare branch      — KB lookup (Cellosaurus → CellLine, NCBI Taxonomy → OrganismTaxon)
+              └─> Rare branch      — human-referent allowlist → Cellosaurus → NCBI Taxonomy
         └─> Combiner (priority: pattern > rare [if common conf < 0.7] > common > requery > drop)
         └─> Overseer / re-query (Qwen3-32B — resolves low-confidence spans via LLM)
         └─> Offset localisation (deterministic string→char offsets, cap=5 per span)
@@ -290,6 +296,14 @@ Document
 - Occurrence cap of 5 per span covers 92.5% of BioRED gold mentions (train set analysis)
 - Rare branch confidence gate (common conf < 0.7) prevents KB from overriding
   confident encoder predictions — improved F1 by +2.6 points
+- **Human-referent allowlist** (`patient`, `patients`, `inpatient`, `man`,
+  `men`, `woman`, `women`) checked before Cellosaurus/NCBI Taxonomy — added
+  after the diagnostic investigation below found these terms have no entry
+  in either external KB despite being valid BioRED OrganismTaxon mentions.
+  Worth +3.6 strict F1 / +38.0 F1 on OrganismTaxon alone (see diagnostic
+  section). As a side effect, this also eliminates the `resolve_rare_entity`
+  sequential-check collision where a term like `"men"` could otherwise match
+  Cellosaurus before NCBI Taxonomy is ever consulted.
 - Cellosaurus uses exact-match on identifier to prevent substring false positives
 - Qwen3-32B think-block (`<think>...</think>`) stripped before JSON parsing
 
@@ -302,7 +316,7 @@ Document
 ```bash
 PYTHONPATH=. uv run agent/run_agent.py \
   --test_json  ./dataset/test/Test.BioC.JSON \
-  --output_dir outputs/tier4_agent \
+  --output_dir outputs/tier4_agent_v2 \
   --limit      5
 ```
 
@@ -310,46 +324,50 @@ PYTHONPATH=. uv run agent/run_agent.py \
 ```bash
 PYTHONPATH=. uv run agent/run_agent.py \
   --test_json  ./dataset/test/Test.BioC.JSON \
-  --output_dir outputs/tier4_agent
+  --output_dir outputs/tier4_agent_v2
 ```
 
 > If interrupted, rerun the same command to resume from checkpoint.
-> Delete `outputs/tier4_agent/checkpoint.jsonl` to start fresh.
+> Delete `outputs/tier4_agent_v2/checkpoint.jsonl` to start fresh.
 > Given the 12K tpm llama limit, a full run takes ~2 sessions across 2 days.
 
 **Score**
 ```bash
 PYTHONPATH=. uv run scorer.py \
-  --pred outputs/tier4_agent/test_predictions.json \
-  --gold outputs/tier4_agent/gold_test.json \
-  --name tier4_agent \
-  --out  outputs/tier4_agent/full_metrics.json
+  --pred outputs/tier4_agent_v2/test_predictions.json \
+  --gold outputs/tier4_agent_v2/gold_test.json \
+  --name tier4_agent_v2 \
+  --out  outputs/tier4_agent_v2/full_metrics.json
 ```
 
-**Results:** Strict F1 **76.7** · Relaxed F1 **79.7** · Macro F1 **68.1**
-Precision 83.9 · Recall 70.7
+**Results:** Strict F1 **80.3** · Relaxed F1 **83.1** · Macro F1 **74.7**
+Precision 85.0 · Recall 76.1
 
 **Per-type (strict):**
 
 | Type | F1 | P | R | Support |
 |---|---|---|---|---|
-| GeneOrGeneProduct | 83.3 | 90.0 | 77.5 | 1180 |
+| **OrganismTaxon** | **85.6** | 88.1 | 83.2 | 393 |
+| GeneOrGeneProduct | 83.4 | 90.2 | 77.5 | 1180 |
 | ChemicalEntity | 82.2 | 88.8 | 76.5 | 754 |
 | DiseaseOrPhenotypicFeature | 77.8 | 74.9 | 80.9 | 917 |
 | SequenceVariant | 59.9 | **100.0** | 42.7 | 241 |
-| OrganismTaxon | 47.6 | 75.9 | 34.6 | 393 |
-| CellLine | 57.8 | 65.0 | 52.0 | 50 |
+| CellLine | 59.1 | 68.4 | 52.0 | 50 |
 
 **Key findings:**
 - Orchestration adds **+15.8 F1** over Tier 3 (same base model, only variable
   is agentic architecture)
 - SequenceVariant precision **1.0** — deterministic regex achieves zero false
   positives on variants it covers; recall limited by BERT span extraction ceiling
+  (measured directly: 93.4% extraction ceiling for SequenceVariant — see the
+  diagnostic section — so the remaining recall gap is mostly headroom the
+  regex rule itself leaves on the table, not an extraction problem)
 - KB confidence gate (+2.6 F1): without it, the rare branch overrides confident
   encoder predictions, causing 85 unnecessary type confusions
-- OrganismTaxon recall (34.6%) is the main weakness — BERT span extractor misses
-  organism mentions like `patients`, `human`, `Chinese hamster`; the KB lookup
-  cannot help what it never receives as a candidate
+- **OrganismTaxon is now the second-strongest type in the system (85.6 F1,
+  up from 47.6 pre-fix).** This was originally misdiagnosed as a span-extraction
+  problem; it turned out to be an external knowledge-base coverage gap. Full
+  diagnostic chain and fix below.
 
 **Span extractor comparison (LLM vs BERT):**
 
@@ -363,15 +381,15 @@ The improvement on a 5-document sanity check:
 | PubMedBERT (fine-tuned) | 58.9 | 94 | 49 | 82 |
 | Delta | +15.0 | +30 | -2 | -30 |
 
-The LLM extractor missed short terms (`sodium`, `NQO1`), abbreviations (`CBR3`),
-and organism mentions in colloquial contexts (`patients`, `human`) that PubMedBERT
-reliably tags because it was trained on BioRED. Since downstream branches can only
-type what the extractor finds, a higher-recall extractor lifts all branch outputs.
-The BERT extractor also removes LLM non-determinism from the span detection step,
-making the pipeline fully reproducible up to the overseer re-query calls.
+The LLM extractor missed short terms (`sodium`, `NQO1`) and abbreviations
+(`CBR3`) that PubMedBERT reliably tags because it was trained on BioRED.
+Since downstream branches can only type what the extractor finds, a
+higher-recall extractor lifts all branch outputs. The BERT extractor also
+removes LLM non-determinism from the span detection step, making the
+pipeline fully reproducible up to the overseer re-query calls.
 
-Note: these are 5-document sanity numbers. The final reported Tier 4 result (76.7
-strict F1) uses the BERT extractor across all 100 test documents.
+Note: these are 5-document sanity numbers. The final reported Tier 4 result
+(80.3 strict F1) uses the BERT extractor across all 100 test documents.
 
 **Branch resolution diagnosis — motivation for Tier 4 Extended:**
 
@@ -421,7 +439,7 @@ Document
                 per call, until it has covered every candidate span or signals "DONE"
                   ├─> common_classifier(span_texts) — same PubMedBERT token classifier as Tier 4
                   ├─> pattern_matcher(span_texts)   — same regex rules as Tier 4
-                  └─> rare_lookup(span_texts)        — same Cellosaurus/NCBI KB lookups as Tier 4
+                  └─> rare_lookup(span_texts)        — same allowlist/Cellosaurus/NCBI KB lookups as Tier 4
               Phase 2 — final answer (tools bound, tool_choice="none"):
                 agent returns one JSON type assignment per span using all
                 gathered evidence plus full passage context
@@ -452,7 +470,10 @@ Document
   which is both slow and — for reasoning models with large hidden
   chain-of-thought token costs — prohibitively expensive.
 - **Checkpointing.** Predictions are written incrementally per document, so
-  an interrupted run (rate limit, network drop) resumes rather than restarting.
+  an interrupted run (rate limit, network drop) resumes rather than
+  restarting. This mattered in practice: one document in the reported v2 run
+  failed with an empty model response mid-run; the checkpoint let it be
+  cleared and retried individually without re-running the other 99 documents.
 
 > Set `IDA_LLM_API_KEY` in `.env` before running. Uses the University of
 > Glasgow HPC-hosted `gpt-oss-120b` endpoint
@@ -467,7 +488,7 @@ Document
 ```bash
 PYTHONPATH=. uv run agent/run_tier5.py \
   --test_json  ./dataset/test/Test.BioC.JSON \
-  --output_dir outputs/tier5_agent \
+  --output_dir outputs/tier5_agent_v2 \
   --limit      3
 ```
 
@@ -475,98 +496,114 @@ PYTHONPATH=. uv run agent/run_tier5.py \
 ```bash
 PYTHONPATH=. uv run agent/run_tier5.py \
   --test_json  ./dataset/test/Test.BioC.JSON \
-  --output_dir outputs/tier5_agent
+  --output_dir outputs/tier5_agent_v2
 ```
 
 > If interrupted, rerun the exact same command — already-completed documents
-> are skipped automatically via `outputs/tier5_agent/checkpoint_predictions.jsonl`.
+> are skipped automatically via `outputs/tier5_agent_v2/checkpoint_predictions.jsonl`.
+> If a specific document fails (e.g. an empty/malformed model response),
+> remove just that document's line from the checkpoint file before rerunning
+> so only that document is retried.
 
 **Score**
 ```bash
 PYTHONPATH=. uv run scorer.py \
-  --pred outputs/tier5_agent/test_predictions.json \
-  --gold outputs/tier5_agent/gold_test.json \
-  --name tier4_extended \
-  --out  outputs/tier5_agent/full_metrics.json
+  --pred outputs/tier5_agent_v2/test_predictions.json \
+  --gold outputs/tier5_agent_v2/gold_test.json \
+  --name tier5_agent_v2 \
+  --out  outputs/tier5_agent_v2/full_metrics.json
 ```
 
-**Results:** Strict F1 **79.2** · Relaxed F1 **82.3** · Macro F1 **78.0**
-Precision 86.3 · Recall 73.2
+**Results:** Strict F1 **79.3** · Relaxed F1 **82.3** · Macro F1 **77.7**
+Precision 85.9 · Recall 73.6
 
 **Per-type (strict):**
 
 | Type | F1 | P | R | Support |
 |---|---|---|---|---|
-| CellLine | **90.3** | 97.7 | 84.0 | 50 |
-| GeneOrGeneProduct | 83.7 | 91.0 | 77.5 | 1180 |
-| ChemicalEntity | 82.4 | 88.8 | 76.8 | 754 |
-| SequenceVariant | **83.6** | 94.3 | 75.1 | 241 |
-| DiseaseOrPhenotypicFeature | 78.8 | 77.3 | 80.5 | 917 |
-| OrganismTaxon | 49.1 | 87.6 | 34.1 | 393 |
+| **CellLine** | **89.1** | 97.6 | 82.0 | 50 |
+| GeneOrGeneProduct | 83.5 | 90.8 | 77.2 | 1180 |
+| ChemicalEntity | 82.5 | 88.1 | 77.6 | 754 |
+| **SequenceVariant** | **79.3** | 91.4 | 70.1 | 241 |
+| DiseaseOrPhenotypicFeature | 79.6 | 77.7 | 81.5 | 917 |
+| OrganismTaxon | 52.2 | 85.1 | 37.7 | 393 |
 
-**Tier 4 vs Tier 4 Extended — per-type F1 delta:**
+**Tier 4 (v2) vs Tier 4 Extended (v2) — final per-type F1 comparison, both with the identical KB fix applied:**
 
-| Type | Tier 4 | Tier 4 Extended | Δ |
-|---|---|---|---|
-| CellLine | 57.8 | 90.3 | **+32.5** |
-| SequenceVariant | 59.9 | 83.6 | **+23.7** |
-| OrganismTaxon | 47.6 | 49.1 | +1.5 |
-| DiseaseOrPhenotypicFeature | 77.8 | 78.8 | +1.0 |
-| GeneOrGeneProduct | 83.3 | 83.7 | +0.4 |
-| ChemicalEntity | 82.2 | 82.4 | +0.2 |
-| **Overall (strict)** | **76.7** | **79.2** | **+2.5** |
-| **Macro F1** | **68.1** | **78.0** | **+9.9** |
+| Type | Tier 4 | Tier 4 Extended | Δ | Winner |
+|---|---|---|---|---|
+| CellLine | 59.1 | 89.1 | **+30.0** | Tier 4 Extended |
+| SequenceVariant | 59.9 | 79.3 | **+19.4** | Tier 4 Extended |
+| DiseaseOrPhenotypicFeature | 77.8 | 79.6 | +1.8 | Tier 4 Extended |
+| ChemicalEntity | 82.2 | 82.5 | +0.3 | Tier 4 Extended |
+| GeneOrGeneProduct | 83.4 | 83.5 | +0.1 | Tier 4 Extended |
+| **OrganismTaxon** | **85.6** | 52.2 | **−33.4** | **Tier 4** |
+| **Overall (strict)** | **80.3** | 79.3 | **−1.0** | **Tier 4** |
+| **Macro F1** | 74.7 | **77.7** | +3.0 | Tier 4 Extended |
 
 **Key findings:**
-- The improvement is **concentrated, not uniform**, and lands exactly where
-  the branch-resolution diagnosis (above) predicted it would: CellLine and
-  SequenceVariant were the two types Tier 4 resolved via a single isolated
-  branch with no possibility of cross-checking. Giving the agent discretion
-  to consult multiple tools per span produces large gains specifically there
-  (+32.5 and +23.7 F1), while types where Tier 4's common branch already had
-  unimpeded access (Gene, Disease, Chemical) move by at most ±1 F1 — there
-  was no arbitration bottleneck left to fix on those types.
-- **SequenceVariant recall nearly doubles** (42.7% → 75.1%) at a small
-  precision cost (100.0% → 94.3%). Tier 4's regex-only pattern branch was
-  maximally conservative (perfect precision, but missed any variant mention
-  it didn't structurally match); the agent uses the same regex tool as one
-  input among several rather than a hard gate, recovering many of the
-  variant mentions the rigid rule alone would drop.
-- **CellLine improves on both precision and recall simultaneously**
-  (65.0%/52.0% → 97.7%/84.0%) — not a tradeoff, a strict win, consistent with
-  the agent combining KB lookup with passage context rather than trusting
-  the KB result in isolation.
-- **OrganismTaxon barely moves** (47.6 → 49.1 F1), and recall in particular
-  is essentially flat (34.6% → 34.1%). Since span extraction is unchanged
-  from Tier 4, this is expected: OrganismTaxon's bottleneck is at the
-  extraction stage (organism mentions like `patients`, `human` are never
-  generated as candidate spans in the first place), which is upstream of
-  arbitration and therefore not something a smarter combiner can fix. This
-  cleanly separates arbitration-fixable errors from extraction-fixable ones.
-- **Error taxonomy improves on every axis simultaneously**: spurious false
-  positives fall (302 → 259), missed false negatives fall (858 → 793), and
-  type-confusion errors nearly halve (73 → 41 total instances).
-- This result directly answers the architectural critique that motivated
-  this tier: Tier 4's combiner gives disproportionate and largely
-  uncontested weight to the common branch for the majority of entity types.
-  Replacing fixed-threshold arbitration with agentic tool selection recovers
-  a substantial share of the performance lost to that structural rigidity,
-  concentrated exactly on the entity types it was diagnosed to affect.
+- **There is no single winner between the two architectures once the KB
+  coverage gap is fixed on both sides.** Tier 4 Extended still wins clearly
+  on CellLine and SequenceVariant — the two types where Tier 4's branch
+  isolation genuinely limits it, exactly as the earlier diagnosis predicted.
+  But Tier 4 now wins overall (80.3 vs 79.3) and decisively on OrganismTaxon
+  (85.6 vs 52.2), reversing the picture from the pre-fix comparison.
+- **The same code fix produced wildly different payoffs across the two
+  architectures**: Tier 4's OrganismTaxon true positives rose from 136 to
+  327 (+191) from the fix alone; Tier 4 Extended's rose from 134 to only 148
+  (+14). Tier 4's `rare_relation_agent` calls `resolve_rare_entity`
+  unconditionally on every candidate span, so the allowlist fix applies
+  universally and for free. Tier 4 Extended's `rare_lookup` is a tool the
+  agent must actively choose to invoke — generic words like `patient` or
+  `women` do not superficially resemble the kind of term that needs an
+  external KB check the way `zebrafish` or `HeLa` does, so the working
+  hypothesis is that the agent under-invokes `rare_lookup` on exactly this
+  class of span. This has not yet been directly confirmed by inspecting the
+  Tier 4 Extended entity log's tool-call records — flagged as a natural next
+  step rather than a settled conclusion.
+- **This reframes the dissertation's central comparison.** The original
+  framing — "agentic orchestration outperforms deterministic arbitration" —
+  was true in the pre-fix comparison, but partly because Tier 4's
+  undiagnosed KB bug was dragging its OrganismTaxon score down, not solely
+  because agentic orchestration is categorically better. The corrected,
+  fairer finding is a **completeness-vs-flexibility tradeoff**: Tier 4's
+  exhaustive, unconditional branch-calling guarantees every candidate gets
+  every applicable check, at the cost of being unable to exploit
+  cross-branch evidence (its CellLine/SequenceVariant weakness). Tier 4
+  Extended's selective, LLM-judged tool calling can combine evidence
+  flexibly and recovers real value where Tier 4 is structurally blind — but
+  that same selectivity means it can silently skip a tool call for spans
+  that don't superficially look like they need it, costing recall precisely
+  where deterministic exhaustiveness would have caught them for free.
+- **SequenceVariant and CellLine shifted between the original and v2 Tier 4
+  Extended runs even though the fix does not touch either type's logic**
+  (SequenceVariant F1 83.6 → 79.3; CellLine F1 90.3 → 89.1). Since
+  `resolve_rare_entity`'s changes only affect OrganismTaxon-adjacent
+  resolution, this movement is attributable to LLM run-to-run
+  non-determinism rather than the fix — concrete evidence for the
+  non-determinism limitation already noted below, not just a theoretical
+  caveat.
+- Error taxonomy for Tier 4 Extended v2: spurious FPs 269, missed FNs 775,
+  type confusions 49+11=60 total — broadly similar shape to the pre-fix run,
+  consistent with the fix affecting OrganismTaxon specifically rather than
+  the system generally.
 
-**Limitation:** this is a single run of a non-deterministic LLM agent.
-Run-to-run variance has not been characterised (unlike Tier 3, which is
-recommended to run 3–5 times); the reported numbers should be read as one
-realisation rather than a stable mean.
+**Limitation:** both v2 results are a single run each of non-deterministic
+LLM agents/APIs (Tier 4's overseer, Tier 4 Extended's orchestrating agent).
+Run-to-run variance has not been formally characterised across repeated
+runs; the SequenceVariant/CellLine shift noted above is suggestive of a
+non-trivial variance band that a single run cannot quantify.
 
 ---
 
-## OrganismTaxon Diagnostic Deep-Dive & Fix (v2)
+## OrganismTaxon Diagnostic Deep-Dive & Fix
 
-Both Tier 4 (76.7 F1) and Tier 4 Extended (79.2 F1) share the same weak spot:
-OrganismTaxon recall stuck at ~34%, essentially flat across two very
-different arbitration strategies. Since arbitration strategy clearly wasn't
-the cause, three scripts were written to isolate which pipeline stage is
-actually responsible, run in sequence:
+Both Tier 4 (76.7 F1) and Tier 4 Extended (79.2 F1), in their original
+pre-fix form, shared the same weak spot: OrganismTaxon recall stuck at ~34%,
+essentially flat across two very different arbitration strategies. Since
+arbitration strategy clearly wasn't the cause, four scripts were written to
+isolate which pipeline stage was actually responsible, run in sequence, each
+one ruling a hypothesis in or out with live data rather than assumption:
 
 1. **`extract_rare_entities.py`** — pulls every gold OrganismTaxon / CellLine
    span out of the test set (`outputs/rare_entity_analysis/`) for the checks
@@ -580,26 +617,32 @@ actually responsible, run in sequence:
 
 2. **`check_extraction_ceiling.py`** — measures what fraction of gold
    OrganismTaxon mentions are ever generated as a BERT candidate span at all.
-   **Result: ~99.5% extraction ceiling.** The extraction stage is not the
-   bottleneck (unlike SequenceVariant, where extraction itself caps recall).
+   **Result: 99.5% extraction ceiling (391/393).** This ruled out the
+   original hypothesis (and the one initially written into this README) that
+   span extraction was the bottleneck. For comparison, SequenceVariant's
+   extraction ceiling is 93.4% and CellLine's is 100% — extraction is a real,
+   separate, smaller constraint on SequenceVariant, but not on OrganismTaxon.
    ```bash
    PYTHONPATH=. uv run check_extraction_ceiling.py --type OrganismTaxon
    ```
 
 3. **`check_rare_collisions.py`** — tests whether OrganismTaxon spans are
-   being misrouted to CellLine because `resolve_rare_entity()` checks
-   Cellosaurus before NCBI Taxonomy. **Result: no collisions** — ruled out.
+   being misrouted to CellLine because `resolve_rare_entity()` checked
+   Cellosaurus before NCBI Taxonomy. **Result: 1/32 unique spans collided**
+   (`"men"` matched a Cellosaurus entry) — real, but far too small a rate to
+   explain the recall gap; ruled out as the primary cause.
    ```bash
    python check_rare_collisions.py \
      --spans_file outputs/rare_entity_analysis/organism_cellline_spans.txt
    ```
 
 4. **`check_ncbi_coverage.py`** — tests every unique gold OrganismTaxon span
-   against the live NCBI Taxonomy API. **Result: colloquial human-referent
-   terms return zero hits** — `patient`, `patients`, `inpatient`, `man`,
+   against the live NCBI Taxonomy API. **Result: 11/32 unique spans return
+   zero hits, and those 11 terms account for 228/393 (58%) of all
+   OrganismTaxon gold mentions** — `patient`, `patients`, `inpatient`, `man`,
    `men`, `woman`, `women` correctly denote *Homo sapiens* in BioRED but have
-   no entry in a species-name taxonomy database. This is the bottleneck: a
-   genuine KB coverage gap, not a code bug.
+   no entry in a species-name taxonomy database. This is the primary
+   bottleneck: a genuine KB coverage gap, not a code bug.
    ```bash
    python check_ncbi_coverage.py \
      --spans_file outputs/rare_entity_analysis/organism_cellline_spans.txt
@@ -610,39 +653,49 @@ checks a small human-referent allowlist before Cellosaurus/NCBI Taxonomy:
 
 ```python
 HUMAN_REFERENT_TERMS = {"patient", "patients", "inpatient", "man", "men", "woman", "women"}
+
+def resolve_rare_entity(text: str) -> tuple[Optional[str], float, str]:
+    if text in _cache:
+        return _cache[text]
+    if text.strip().lower() in HUMAN_REFERENT_TERMS:
+        result = ("OrganismTaxon", 1.0, "human_referent_allowlist")
+        _cache[text] = result
+        return result
+    if lookup_cellosaurus(text):
+        ...
 ```
 
-**Results with the fix** (`outputs/tier4_agent_v2/`, `outputs/tier5_agent_v2/`,
-same 100-doc test set, same span extractor, everything else unchanged):
+**Results with the fix**, both re-run to completion on the same 100-doc test
+set with the same span extractor and everything else unchanged
+(`outputs/tier4_agent_v2/`, `outputs/tier5_agent_v2/`):
 
-| System | Strict F1 (before → after) | OrganismTaxon F1 | OrganismTaxon Recall |
-|---|---|---|---|
-| Tier 4 | 76.7 → **80.3** (+3.6) | 47.6 → **85.6** (+38.0) | 34.6% → **83.2%** |
-| Tier 4 Extended | 79.2 → **79.3** (+0.1) | 49.1 → **52.2** (+3.1) | 34.1% → **37.7%** |
+| System | Strict F1 (before → after) | OrganismTaxon F1 | OrganismTaxon Recall | OrganismTaxon TP gained |
+|---|---|---|---|---|
+| Tier 4 | 76.7 → **80.3** (+3.6) | 47.6 → **85.6** (+38.0) | 34.6% → **83.2%** | +191 |
+| Tier 4 Extended | 79.2 → **79.3** (+0.1) | 49.1 → **52.2** (+3.1) | 34.1% → **37.7%** | +14 |
 
 **Key findings:**
-- The fix is disproportionately more valuable for Tier 4's deterministic
-  combiner (+38.0 F1 on the type) than for Tier 4 Extended's LLM-orchestrated
-  agent (+3.1 F1). The rare branch's raw KB result feeds Tier 4's combiner
-  directly, so a KB coverage gap propagates straight through; Tier 4
-  Extended's agent has full passage context and can reason about "patient"
-  independently of what the KB tool returns, so it was already partially
-  compensating for the gap the deterministic combiner could not.
-- **Tier 4 v2 (80.3 strict F1) now exceeds Tier 4 Extended (79.2/79.3 strict
-  F1).** With the extraction-stage and KB-coverage bottlenecks accounted for,
-  the deterministic-combiner architecture edges ahead again — the earlier
-  Tier 4 vs. Tier 4 Extended comparison was partly confounded by this
-  fixable KB gap rather than purely reflecting arbitration strategy.
+- The fix is dramatically more valuable for Tier 4's deterministic combiner
+  than for Tier 4 Extended's LLM-orchestrated agent, and the gap is not
+  small — 191 recovered true positives versus 14. This is now the leading
+  explanation for the reversal in the head-to-head comparison above: Tier 4's
+  rare branch is called unconditionally on every span, so it benefits from
+  the fix everywhere the fix applies, whereas Tier 4 Extended's agent has to
+  choose to invoke the same underlying function, and mostly does not for
+  this class of generic term.
+- **Tier 4 v2 (80.3 strict F1) now exceeds Tier 4 Extended v2 (79.3 strict
+  F1) overall**, though Tier 4 Extended remains clearly stronger on
+  CellLine and SequenceVariant. The original Tier 4 vs. Tier 4 Extended
+  comparison in earlier drafts of this work was confounded by this fixable
+  KB gap; seeing both systems after the fix is the fairer test of
+  arbitration strategy on its own terms, and the fairer test shows a
+  tradeoff, not a clean win for either side.
 - This diagnostic chain (extraction ceiling → collision check → KB coverage
-  check) directly resolves the "OrganismTaxon recall" item in **Known
-  Limitations** below: the bottleneck is neither span extraction nor
-  branch-arbitration order, but KB domain coverage for colloquial referents.
-
-> **Status:** `rare_agent_utils.py`'s allowlist change is not yet committed.
-> `outputs/tier4_agent_v2/` and `outputs/tier5_agent_v2/` reflect this
-> uncommitted code, so headline numbers elsewhere in this README (Results
-> Summary, Ablation Table, Known Limitations) still describe the
-> pre-fix `tier4_agent/` / `tier5_agent/` runs unless noted otherwise.
+  check) directly resolves the "OrganismTaxon recall" item that was
+  previously in **Known Limitations**: the bottleneck was neither span
+  extraction nor branch-ordering, but KB domain coverage for colloquial
+  referents — and it was diagnosed by testing each candidate explanation
+  against live data rather than accepting the first plausible-sounding one.
 
 ---
 
@@ -654,25 +707,36 @@ same 100-doc test set, same span extractor, everything else unchanged):
 | 2 | GLiNER-biomed zero-shot | 63.3 | 76.3 | 52.3 | 64.7 | 61.9 |
 | 3 | LLM 0-shot | 60.9 | 67.5 | 51.5 | 61.9 | 59.9 |
 | 3 | LLM 3-shot | 57.9 | 64.8 | 51.4 | 65.5 | 51.8 |
-| 4 | Multi-agent system | 76.7 | 79.7 | 68.1 | 83.9 | 70.7 |
-| **4 Extended** | **LLM-orchestrated agent** | **79.2** | **82.3** | **78.0** | **86.3** | **73.2** |
+| 4 | Multi-agent system | **80.3** | 83.1 | 74.7 | 85.0 | 76.1 |
+| **4 Extended** | **LLM-orchestrated agent** | 79.3 | **82.3** | **77.7** | **85.9** | 73.6 |
+
+*Tier 4 and Tier 4 Extended figures are the `_v2` (KB-fix) results. See the
+diagnostic section above for the pre-fix numbers and the reasoning behind
+the fix.*
 
 ---
 
 ## Ablation Table (Tier 4)
 
-Each row disables one component and reports the F1 drop.
-Shows which parts of the architecture contribute measurably.
+Each row disables one component and reports the F1 drop, measured against
+the **pre-fix** Tier 4 baseline (76.7 F1) — these ablations were run before
+the human-referent allowlist fix was diagnosed and have not been re-run
+against the fixed `tier4_agent_v2` baseline. The fix itself is added as a
+final row for reference, but its interaction with the other ablated
+components (e.g. does the rare-branch ablation delta change once the KB gap
+is fixed?) has not been tested and is flagged here as a gap rather than
+silently assumed away.
 
 | System | Strict F1 | Δ | What this measures |
 |---|---|---|---|
-| Full system | 76.7 | — | — |
+| Full system (pre-fix) | 76.7 | — | — |
 | − KB confidence gate | 74.1 | −2.6 | value of gating rare branch on common confidence |
 | − rare branch | 74.2 | −2.5 | value of KB lookup for OrganismTaxon / CellLine |
 | − pattern branch | 74.2 | −2.5 | value of deterministic regex for SequenceVariant |
 | − overseer / requery | 76.7 | −0 | value of LLM re-query for low-confidence spans |
 | Single-LLM (Tier 3) | 60.9 | −15.8 | total value of agentic orchestration |
-| Tier 4 Extended | 79.2 | +2.5 | value of replacing the combiner with LLM-orchestrated tool selection |
+| Tier 4 Extended (pre-fix) | 79.2 | +2.5 | value of replacing the combiner with LLM-orchestrated tool selection |
+| **+ Human-referent allowlist fix** | **80.3** | **+3.6** | value of closing the NCBI Taxonomy coverage gap (see diagnostic section) |
 
 ---
 
@@ -694,7 +758,10 @@ primarily by the loss of OrganismTaxon and CellLine predictions that the common 
 does not reliably produce. The rare branch is the only source of OrganismTaxon
 predictions in the pipeline; without it, all 393 gold organism mentions become false
 negatives by default. The equal delta to the pattern branch (below) confirms the two
-branches serve complementary, non-overlapping parts of the entity type space.
+branches serve complementary, non-overlapping parts of the entity type space. Note this
+ablation predates the human-referent allowlist fix — with the fix in place, the rare
+branch's contribution is very likely larger, since it is now the sole source of the
+228 human-referent mentions as well.
 
 **Pattern branch / regex (F1 delta: -2.5)**
 Disabling deterministic regex for SequenceVariant dropped F1 by 2.5 points and
@@ -717,25 +784,33 @@ grounding requires confidence-aware arbitration: a naive KB lookup that ignores 
 encoder's posterior is actively harmful.
 
 **Single-LLM baseline / Tier 3 (F1 delta: -15.8)**
-The gap between Tier 3 (60.9) and the full Tier 4 system (76.7) represents the total
-contribution of agentic orchestration, holding the base model constant. This 15.8-point
-gain decomposes approximately as: heterogeneous routing adds ~5.0 (rare + pattern
-branches combined), the confidence gate adds ~2.6, and the remaining ~8.2 comes from
-the structured combiner and BERT span extraction replacing the LLM extractor. No single
-component accounts for the full gain, confirming that the architecture's value is
-emergent rather than attributable to any one design decision.
+The gap between Tier 3 (60.9) and the full Tier 4 system (76.7, pre-fix) represents the
+total contribution of agentic orchestration, holding the base model constant. This
+15.8-point gain decomposes approximately as: heterogeneous routing adds ~5.0 (rare +
+pattern branches combined), the confidence gate adds ~2.6, and the remaining ~8.2 comes
+from the structured combiner and BERT span extraction replacing the LLM extractor. No
+single component accounts for the full gain, confirming that the architecture's value
+is emergent rather than attributable to any one design decision.
 
-**Tier 4 Extended / LLM-orchestrated arbitration (F1 delta: +2.5 overall, +9.9 macro)**
+**Tier 4 Extended / LLM-orchestrated arbitration (F1 delta: +2.5 overall, pre-fix)**
 Replacing the entire combiner — confidence gate included — with LLM-orchestrated tool
-selection recovers a further +2.5 strict F1 on top of the full Tier 4 system, holding
-span extraction and all three underlying branch methods constant. Critically, this gain
-is not uniform: it is concentrated almost entirely in the two entity types (CellLine,
-SequenceVariant) that the branch-resolution diagnosis showed were resolved by a single
-isolated branch with zero cross-branch competition under Tier 4. This confirms the
-KB confidence gate's earlier finding from the opposite direction — where a fixed
-threshold prevents harmful KB overrides, it also prevents beneficial ones, and an
-agent that can weigh evidence contextually per span recovers value the fixed rule
-structurally cannot access.
+selection recovered +2.5 strict F1 on top of the pre-fix Tier 4 system, concentrated
+almost entirely in CellLine and SequenceVariant. As the diagnostic section and the
+final head-to-head comparison above show, part of this apparent advantage was a
+byproduct of Tier 4's undiagnosed KB coverage gap rather than a pure arbitration-strategy
+effect: once both systems have the fix, Tier 4 Extended's overall lead disappears
+(80.3 vs. 79.3), even though its CellLine/SequenceVariant advantage — the part of the
+finding not confounded by the KB gap — remains real and substantial.
+
+**Human-referent allowlist fix (F1 delta: +3.6 for Tier 4, +0.1 for Tier 4 Extended)**
+The single largest lever identified in this dissertation, found through a systematic
+elimination of competing hypotheses (extraction ceiling, branch-ordering collisions,
+KB coverage) rather than intuition. Its effect size differs by more than an order of
+magnitude between the two arbitration strategies, which is itself the most interesting
+finding to come out of the fix: identical underlying tools, identical underlying bug,
+almost entirely different practical impact, depending on whether the branch is called
+unconditionally (Tier 4) or is one option an LLM must choose to exercise (Tier 4
+Extended).
 
 ---
 
@@ -762,43 +837,64 @@ structurally cannot access.
    small models.
 
 5. **Agentic orchestration adds +15.8 F1 over a single LLM call.** Tier 3 →
-   Tier 4 with the same base model. The improvement is attributable to:
-   heterogeneous routing (each entity class handled by the method best suited
-   to it), KB-grounded type validation, and the confidence-gated combiner.
+   Tier 4 (pre-fix) with the same base model. The improvement is attributable
+   to: heterogeneous routing (each entity class handled by the method best
+   suited to it), KB-grounded type validation, and the confidence-gated
+   combiner.
 
-6. **Tier 4 achieves highest precision (83.9) of any non-fine-tuned tier.**
-   The combiner and KB grounding reduce spurious predictions. The tradeoff is
-   lower recall (70.7) than Tier 1 (92.0) — the agentic system is more
+6. **Tier 4 achieves the highest precision of any non-fine-tuned tier** (85.0
+   post-fix). The combiner and KB grounding reduce spurious predictions. The
+   tradeoff is lower recall than Tier 1 (92.0) — the agentic system is more
    conservative but more precise.
 
 7. **Deterministic arbitration systematically under-serves branch-isolated
-   entity types, and this is fixable without touching span extraction or the
-   underlying branch methods.** Tier 4's combiner routes each of the six
-   entity types to exactly one branch by construction, with essentially zero
-   cross-branch contest. Tier 4 Extended shows that replacing only the
-   arbitration logic — same tools, same span extractor — recovers +32.5 F1
-   on CellLine and +23.7 F1 on SequenceVariant, while leaving common-branch-
-   dominated types (Gene, Disease, Chemical) unchanged. This isolates
-   arbitration flexibility as the causal factor, distinct from model quality
-   or extraction coverage.
+   entity types where genuine cross-branch competition would help — and this
+   is fixable without touching span extraction or the underlying branch
+   methods.** Tier 4's combiner routes each of the six entity types to
+   exactly one branch by construction, with essentially zero cross-branch
+   contest. Tier 4 Extended shows that replacing only the arbitration logic —
+   same tools, same span extractor — recovers +30.0 F1 on CellLine and
+   +19.4 F1 on SequenceVariant even after both systems have the KB fix,
+   while leaving common-branch-dominated types (Gene, Disease, Chemical)
+   essentially unchanged. This isolates arbitration flexibility as a real,
+   unconfounded causal factor for these two types specifically.
+
+8. **The inverse is also true, and is the more novel finding: deterministic,
+   unconditional branch-calling has a completeness advantage that selective
+   agentic tool-calling can quietly give up.** The human-referent allowlist
+   fix recovered 191 OrganismTaxon true positives for Tier 4 (which calls its
+   rare branch on every candidate span, no exceptions) but only 14 for Tier 4
+   Extended (whose agent must choose to invoke the equivalent tool, and
+   apparently often doesn't for spans that don't superficially resemble
+   knowledge-base-lookup candidates). Neither architecture is categorically
+   superior; each has a distinct, type-dependent failure mode. This
+   reframes the dissertation's central architectural question from "does
+   agentic orchestration beat deterministic arbitration" to "which failure
+   modes does each strategy trade for which."
 
 ---
 
 ## Known Limitations
 
-- **OrganismTaxon recall (34.6% Tier 4 / 34.1% Tier 4 Extended)** — diagnosed
-  in full in **OrganismTaxon Diagnostic Deep-Dive & Fix (v2)** above. It is
-  *not* a span-extraction problem (extraction ceiling ≈99.5%) or a branch-
-  ordering problem (no Cellosaurus/NCBI collisions); it's an NCBI Taxonomy
-  coverage gap for colloquial human-referent terms (`patient`, `man`,
-  `woman`, etc.), which a small allowlist fix resolves — recall rises to
-  83.2% (Tier 4) / 37.7% (Tier 4 Extended) in `outputs/tier4_agent_v2` /
-  `tier5_agent_v2`. That fix is uncommitted as of this writing, so the
-  headline numbers above still reflect the pre-fix runs.
-- **SequenceVariant recall ceiling** — same span extraction limitation.
-  138 gold variants were never extracted as candidates under Tier 4; Tier 4
-  Extended's improvement (42.7% → 75.1% recall) comes from typing more of
-  the candidates that were extracted, not from extracting more of them.
+- **OrganismTaxon recall — resolved for Tier 4, only partially for Tier 4
+  Extended.** Diagnosed in full in **OrganismTaxon Diagnostic Deep-Dive &
+  Fix** above. It is *not* a span-extraction problem (extraction ceiling
+  ≈99.5%) or a branch-ordering problem (only 1/32 unique spans collided with
+  Cellosaurus); it is an NCBI Taxonomy coverage gap for colloquial
+  human-referent terms (`patient`, `man`, `woman`, etc.), covering 58% of all
+  OrganismTaxon gold mentions. A small allowlist fix raises Tier 4's
+  OrganismTaxon recall to 83.2%, but Tier 4 Extended's only to 37.7% — the
+  fix's value depends heavily on whether the branch is called unconditionally
+  or is agent-selected, and the exact mechanism behind Tier 4 Extended's
+  much smaller gain has not yet been directly confirmed via its entity log's
+  tool-call records (flagged as follow-up work).
+- **SequenceVariant recall ceiling** — genuine span-extraction limitation,
+  distinct from the OrganismTaxon issue above. Extraction ceiling measured
+  directly at 93.4% (16/241 gold variants never extracted as candidates
+  under either Tier 4 or Tier 4 Extended, since both share the same
+  extractor). Tier 4 Extended's improvement over Tier 4 on this type
+  (42.7% → 70.1% recall) comes from typing more of the candidates that
+  were extracted, not from extracting more of them.
 - **CellLine variance** — support of 50 in the test set makes per-type F1
   high-variance. Results should be interpreted cautiously.
 - **Descriptive annotation spans** — a subset of BioRED gold annotations are
@@ -806,8 +902,17 @@ structurally cannot access.
   no NER system returns as a single span. These affect all tiers equally.
 - **LLM non-determinism** — Tier 3, Tier 4's overseer, and Tier 4 Extended's
   agent all use LLMs. Tier 3 is run at temperature 0 with multiple runs
-  recommended for headline numbers. Tier 4 Extended's reported result is a
-  single run; run-to-run variance has not been characterised.
+  recommended for headline numbers. Tier 4 Extended's SequenceVariant and
+  CellLine F1 shifted by several points between its original and v2 runs
+  despite no code change affecting either type, which is concrete evidence
+  of non-trivial run-to-run variance rather than just a theoretical caveat;
+  formal multi-run statistics have not been collected for either LLM-based
+  agentic tier.
+- **Ablation table baseline mismatch** — the Tier 4 ablation table (rare
+  branch, pattern branch, KB confidence gate, overseer) was measured against
+  the pre-fix system and has not been re-run against `tier4_agent_v2`.
+  Component-level deltas may differ once the human-referent allowlist fix is
+  included in the baseline, particularly for the rare-branch ablation.
 
 ---
 
