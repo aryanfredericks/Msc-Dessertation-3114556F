@@ -1,19 +1,4 @@
-"""Tier 1 - run the fine-tuned PubMedBERT on the BioRED test set and save outputs.
 
-Run:
-  python predict.py \
-    --model_dir outputs/tier1_pubmedbert/model \
-    --test_json /path/to/data/test/Test.BioC.JSON \
-    --output_dir outputs/tier1_pubmedbert
-
-Outputs (canonical format, reused by every later tier's scorer):
-  outputs/tier1_pubmedbert/test_predictions.json
-  outputs/tier1_pubmedbert/gold_test.json
-  outputs/tier1_pubmedbert/test_strict_metrics.json   (quick sanity F1)
-
-The strict number here is a sanity check. The full strict / relaxed / per-type /
-cost table comes from the shared cross-tier scorer built in a later step.
-"""
 import argparse
 import json
 import os

@@ -1,38 +1,3 @@
-"""
-analyze_confidence_calibration.py
-
-Answers: "would raising the common-branch confidence threshold from 0.5 to
-0.75 (or anywhere else) actually help?" - empirically, using real run data.
-
-Joins three files from a single run:
-  - entity_log.jsonl        (doc_id, span_text, entity_type, source, confidence, requeried)
-    written by AgentWorkflow.save_stats() - confidence BEFORE offset localization
-  - test_predictions.json   ({doc_id: [{start, end, type, text}, ...]})
-    final localized predictions
-  - gold_test.json          ({doc_id: [{start, end, type, text}, ...]})
-    gold labels, same format
-
-Join key: (doc_id, span_text). Span extraction dedupes surface strings per
-document, so a given (doc_id, text) should map to exactly one entity_log
-row; if extraction produced accidental duplicates, they'll have identical
-confidence anyway since the underlying model call is deterministic, so
-picking the first match is safe.
-
-Outputs:
-  - confidence_calibration.csv   (prediction-level: doc_id, text, type, branch, confidence, correct)
-  - confidence_calibration_summary.json  (mean/median confidence, TP vs FP, per type/branch)
-  - threshold_sweep.csv          (for a range of thresholds: how many currently-accepted
-                                   TP/FP predictions would newly fall below it)
-  - confidence_calibration_chart.png  (histograms: correct vs incorrect confidence, per type)
-
-Usage:
-    python analyze_confidence_calibration.py \
-        --entity_log outputs/tier4_agent_bc5cdr/branch_analysis/entity_log_<ts>.jsonl \
-        --predictions outputs/tier4_agent_bc5cdr/test_predictions.json \
-        --gold outputs/tier4_agent_bc5cdr/gold_test.json \
-        --out_dir outputs/tier4_agent_bc5cdr/calibration_analysis
-"""
-
 import json
 import csv
 import argparse
@@ -53,7 +18,7 @@ def load_entity_log(path: str) -> dict:
             key = (row["doc_id"], row["span_text"])
             if key in lookup:
                 collisions += 1
-                continue  # keep first; confidence should be identical anyway
+                continue 
             lookup[key] = {
                 "entity_type": row["entity_type"],
                 "source": row["source"],
@@ -125,7 +90,6 @@ def main():
     print(f"[join] {total_preds} predictions total, {unmatched} unmatched "
           f"({100*unmatched/total_preds:.1f}%), {len(rows)} joined rows")
 
-    # --- write prediction-level CSV ---
     csv_path = out_dir / "confidence_calibration.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["doc_id", "text", "type", "branch",
@@ -135,7 +99,6 @@ def main():
             writer.writerow(r)
     print(f"[write] {csv_path}")
 
-    # --- summary stats: mean/median confidence, TP vs FP, per type + branch ---
     def mean(xs):
         return sum(xs) / len(xs) if xs else None
 
@@ -174,7 +137,6 @@ def main():
         print(f"    mean conf   correct={s['mean_confidence_correct']}  incorrect={s['mean_confidence_incorrect']}")
         print(f"    median conf correct={s['median_confidence_correct']}  incorrect={s['median_confidence_incorrect']}")
 
-    # --- threshold sweep: for common-branch predictions only (the ones actually gated) ---
     common_rows = [r for r in rows if r["branch"] == "common"]
     thresholds = [round(0.05 * i, 2) for i in range(10, 20)]  # 0.50 .. 0.95
 
@@ -207,7 +169,6 @@ def main():
         pct_tp_lost = 100 * tp_flagged / total_tp if total_tp else 0.0
         print(f"{t:>7} {tp_flagged:>11} {fp_flagged:>11} {pct_fp_caught:>10.1f}% {pct_tp_lost:>8.1f}%")
 
-    # --- chart: confidence histograms, correct vs incorrect, per entity type ---
     try:
         import matplotlib.pyplot as plt
 

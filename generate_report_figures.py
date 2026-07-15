@@ -1,37 +1,3 @@
-"""
-generate_report_figures.py
-
-Scans a directory tree for full_metrics.json files (as written by scorer.py
-for every tier in this project) and generates a set of comparison figures
-suitable for dropping directly into the dissertation report.
-
-Handles tiers with missing per_type_strict entries, zero-support types
-(e.g. an out-of-distribution run like BC5CDR where several BioRED-only
-types have no gold at all), and any number of tiers - it discovers
-whatever full_metrics.json files exist rather than hardcoding tier names.
-
-Usage:
-    python generate_report_figures.py --root outputs --out report_figures
-    python generate_report_figures.py --root outputs --out report_figures --exclude tier4_agent_bc5cdr
-
-Output (in --out):
-    01_results_summary.png       - strict/relaxed/macro F1 per tier, grouped bars
-    02_per_type_f1_heatmap.png   - tier x entity-type F1 heatmap (zero-support cells left blank)
-    03_precision_recall.png      - precision vs recall scatter, one point per tier, iso-F1 reference lines
-    04_error_taxonomy.png        - error category breakdown per tier, stacked bars
-    05_tier4_vs_tier4_extended.png  - only generated if both tier4_agent and
-                                      tier5_agent (or equivalents) are found
-    06_ablation_<tier>.png       - one per base tier that has ablation variants
-                                    detected (folder name differs from the JSON's
-                                    internal "name" field, e.g. ablation_no_overseer/)
-    07_strict_sanity_summary.png - P/R/F1 from each run's inline sanity check
-                                    (test_strict_metrics.json)
-    08_strict_tp_fp_fn.png       - TP/FP/FN counts from the same sanity-check files
-    09_sanity_vs_scorer_consistency.png - cross-checks test_strict_metrics.json's
-                                    F1 against scorer.py's full_metrics.json F1 per
-                                    tier; flags any tier where they disagree by >0.5 F1
-"""
-
 import json
 import argparse
 from pathlib import Path
@@ -46,16 +12,22 @@ DISPLAY_NAMES = {
     "tier2_gliner": "Tier 2: GLiNER",
     "tier3_llm_0shot": "Tier 3: LLM (0-shot)",
     "tier3_llm_3shot": "Tier 3: LLM (3-shot)",
-    "tier4_agent": "Tier 4: Multi-Agent",
-    "tier5_agent": "Tier 4 Extended: LLM-Orchestrated",
-    "tier4_extended": "Tier 4 Extended: LLM-Orchestrated",
+    "tier4_agent": "Tier 4: Multi-Agent (pre-fix)",
+    "tier4_agent_v2": "Tier 4: Multi-Agent (KB fix)",
+    "tier5_agent": "Tier 4 Extended: LLM-Orchestrated (pre-fix)",
+    "tier5_agent_v2": "Tier 4 Extended: LLM-Orchestrated (KB fix)",
+    "tier4_extended": "Tier 4 Extended: LLM-Orchestrated (pre-fix)",
+    "tier4_extended_v2": "Tier 4 Extended: LLM-Orchestrated (KB fix)",
+    "tier4_agent_bc5cdr": "Tier 4: Multi-Agent (BC5CDR, OOD)",
 }
 
 # preferred left-to-right / top-to-bottom ordering for known tiers; anything
 # unrecognised is appended after these, alphabetically
 PREFERRED_ORDER = [
     "tier1_pubmedbert", "tier2_gliner", "tier3_llm_0shot", "tier3_llm_3shot",
-    "tier4_agent", "tier5_agent", "tier4_extended",
+    "tier4_agent", "tier4_agent_v2",
+    "tier5_agent", "tier5_agent_v2", "tier4_extended", "tier4_extended_v2",
+    "tier4_agent_bc5cdr",
 ]
 
 ENTITY_TYPES = [
@@ -95,7 +67,7 @@ def display_name(unique_id: str) -> str:
     if "__" in unique_id:
         base, suffix = unique_id.split("__", 1)
         base_label = DISPLAY_NAMES.get(base, base.replace("_", " ").title())
-        return f"{base_label} (\u2212 {ablation_label(suffix)})"
+        return f"{base_label} (− {ablation_label(suffix)})"
     return DISPLAY_NAMES.get(unique_id, unique_id.replace("_", " ").title())
 
 
@@ -107,6 +79,35 @@ def sort_key(unique_id: str):
     return (1, base, 1 if is_variant else 0, unique_id)
 
 
+def canonical_base(raw_name: str) -> str:
+    """Strips a trailing "_v2" so a pre-fix tier and its fixed re-run group
+    together, e.g. tier4_agent_v2 -> tier4_agent."""
+    return raw_name[:-3] if raw_name.endswith("_v2") else raw_name
+
+
+def resolve_canonical_tiers(tier_level: list[dict]) -> list[dict]:
+    """Collapses pre-fix / fixed(_v2) pairs of the same tier down to a single
+    canonical entry, preferring the _v2 (fixed) result, since that is what
+    the dissertation reports as the headline number. The pre-fix number is
+    not discarded by this - it is still used by fig10's before/after
+    comparison - it is just not double-counted in the main summary figures.
+    Out-of-distribution (*_bc5cdr) runs are dropped entirely here, since
+    they are a separate generalisation check, not part of the main
+    in-distribution tier comparison; they get their own figure (11)."""
+    groups: dict[str, list[dict]] = {}
+    for d in tier_level:
+        if d["_raw_name"].endswith("_bc5cdr"):
+            continue
+        groups.setdefault(canonical_base(d["_raw_name"]), []).append(d)
+
+    chosen = []
+    for base, members in groups.items():
+        v2s = [m for m in members if m["_raw_name"].endswith("_v2")]
+        chosen.append(v2s[0] if v2s else members[0])
+    chosen.sort(key=lambda d: sort_key(d["_raw_name"]))
+    return chosen
+
+
 def load_all_metrics(root: Path, exclude: set[str]) -> list[dict]:
     results = []
     for path in sorted(root.rglob("full_metrics.json")):
@@ -114,27 +115,33 @@ def load_all_metrics(root: Path, exclude: set[str]) -> list[dict]:
             data = json.load(f)
 
         json_name = data.get("name", path.parent.name)
-        folder_name = path.parent.name
 
-        # if the immediate containing folder name differs from the JSON's
-        # own "name" field, this is a variant nested under a tier's output
-        # directory (e.g. outputs/tier4_agent/ablation_no_overseer/) whose
-        # scorer.py --name argument wasn't changed per-variant. Use the
-        # folder name to disambiguate rather than silently collapsing every
-        # variant into one label.
-        if folder_name != json_name:
-            unique_id = f"{json_name}__{folder_name}"
-        else:
-            unique_id = json_name
+        # Identity comes from position in the folder tree relative to
+        # --root, not from the JSON's own "name" field: a top-level folder
+        # is always its own tier, a folder nested one level deeper (e.g.
+        # tier4_agent/ablation_no_overseer/) is a variant of its parent.
+        # Using the JSON name here would misclassify sibling re-runs like
+        # tier4_agent_v2/ (whose internal "name" is still "tier4_agent") as
+        # an ablation variant of tier4_agent instead of its own tier.
+        rel_parts = path.parent.relative_to(root).parts
+        if not rel_parts:
+            continue
+        base_name = rel_parts[0]
+        is_variant = len(rel_parts) > 1
+        unique_id = f"{base_name}__{rel_parts[-1]}" if is_variant else base_name
 
-        base_name = unique_id.split("__")[0]
-        if base_name in exclude or json_name in exclude or folder_name in exclude or unique_id in exclude:
+        if base_name in exclude or json_name in exclude or unique_id in exclude:
             print(f"[skip] {path} (excluded)")
             continue
 
+        if not is_variant and json_name != base_name:
+            print(f"[note] {path}: internal name '{json_name}' differs from "
+                  f"folder '{base_name}' - using folder name as the tier id")
+
         data["_raw_name"] = unique_id
         data["_base_name"] = base_name
-        data["_is_variant"] = "__" in unique_id
+        data["_is_variant"] = is_variant
+        data["_json_name"] = json_name
         data["_path"] = str(path)
         results.append(data)
         print(f"[load] {path} -> id='{unique_id}'")
@@ -286,13 +293,20 @@ def fig04_error_taxonomy(all_metrics: list[dict], out_dir: Path):
 
 def fig05_tier4_vs_extended(all_metrics: list[dict], out_dir: Path):
     by_name = {d["_raw_name"]: d for d in all_metrics}
-    tier4 = by_name.get("tier4_agent")
-    extended = by_name.get("tier5_agent") or by_name.get("tier4_extended")
+    tier4 = by_name.get("tier4_agent_v2") or by_name.get("tier4_agent")
+    extended = (by_name.get("tier5_agent_v2") or by_name.get("tier5_agent")
+                or by_name.get("tier4_extended_v2") or by_name.get("tier4_extended"))
 
     if tier4 is None or extended is None:
-        print("[skip] 05_tier4_vs_tier4_extended.png - need both tier4_agent and "
-              "tier5_agent/tier4_extended full_metrics.json present")
+        print("[skip] 05_tier4_vs_tier4_extended.png - need both a Tier 4 and a "
+              "Tier 4 Extended full_metrics.json present")
         return
+
+    fixed_pair = tier4["_raw_name"].endswith("_v2") and extended["_raw_name"].endswith("_v2")
+    if fixed_pair:
+        subtitle = "(both with the OrganismTaxon knowledge-base fix applied)"
+    else:
+        subtitle = "(pre-fix - a fixed/_v2 pair was not found for both tiers)"
 
     types_present = [t for t in ENTITY_TYPES
                       if tier4.get("per_type_strict", {}).get(t, {}).get("support", 0) > 0]
@@ -310,7 +324,7 @@ def fig05_tier4_vs_extended(all_metrics: list[dict], out_dir: Path):
     height = 0.35
 
     fig, ax = plt.subplots(figsize=(10, max(4, 0.7 * len(types_sorted) + 1.5)))
-    ax.barh(y + height/2, t4_sorted, height, label=display_name("tier4_agent"), color="#C44E52")
+    ax.barh(y + height/2, t4_sorted, height, label=display_name(tier4["_raw_name"]), color="#C44E52")
     ax.barh(y - height/2, t5_sorted, height, label=display_name(extended["_raw_name"]), color="#4C72B0")
 
     for i, (v4, v5) in enumerate(zip(t4_sorted, t5_sorted)):
@@ -326,8 +340,8 @@ def fig05_tier4_vs_extended(all_metrics: list[dict], out_dir: Path):
     ax.set_yticklabels(types_sorted)
     ax.set_xlabel("Strict F1")
     ax.set_xlim(0, 115)
-    ax.set_title("Tier 4 vs Tier 4 Extended — per-type F1")
-    ax.legend(loc="lower right")
+    ax.set_title(f"Tier 4 vs Tier 4 Extended — per-type F1\n{subtitle}")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=2, frameon=False)
 
     plt.tight_layout()
     path = out_dir / "05_tier4_vs_tier4_extended.png"
@@ -348,9 +362,9 @@ def fig06_ablation_breakdown(all_metrics: list[dict], out_dir: Path):
 
     bases_with_ablations = [b for b in variants_by_base if b in full_by_base]
     if not bases_with_ablations:
-        print("[skip] 06_ablation_breakdown.png - no ablation variants found "
-              "(a variant is any full_metrics.json whose containing folder name "
-              "differs from its internal 'name' field)")
+        print("[skip] 06_ablation_*.png - no ablation variants found "
+              "(a variant is any full_metrics.json nested one folder deeper "
+              "than its parent tier's own full_metrics.json)")
         return
 
     for base in bases_with_ablations:
@@ -511,8 +525,8 @@ def fig09_sanity_vs_scorer_consistency(strict_results: list[dict], full_metrics:
 
     for i, (s, sc) in enumerate(zip(sanity_f1, scorer_f1)):
         diff = abs(s - sc)
-        flag = "  \u26a0 MISMATCH" if diff > 0.5 else ""
-        ax.text(max(s, sc) + 1, y[i], f"\u0394={diff:.2f}{flag}", va="center", fontsize=8,
+        flag = "  ⚠ MISMATCH" if diff > 0.5 else ""
+        ax.text(max(s, sc) + 1, y[i], f"Δ={diff:.2f}{flag}", va="center", fontsize=8,
                  color="red" if diff > 0.5 else "gray")
 
     ax.set_yticks(y)
@@ -528,6 +542,123 @@ def fig09_sanity_vs_scorer_consistency(strict_results: list[dict], full_metrics:
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"[saved] {path}")
+
+
+def fig10_kb_fix_before_after(all_metrics: list[dict], out_dir: Path):
+    """Compares every base tier that has both a pre-fix and a _v2 (fixed)
+    run on overall strict F1 and OrganismTaxon strict F1, the two numbers
+    the dissertation's OrganismTaxon diagnostic section reports before and
+    after the human-referent allowlist fix."""
+    by_id = {d["_raw_name"]: d for d in all_metrics}
+    bases = sorted({canonical_base(d["_raw_name"]) for d in all_metrics if d["_raw_name"].endswith("_v2")})
+    pairs = [(base, f"{base}_v2") for base in bases if base in by_id and f"{base}_v2" in by_id]
+
+    if not pairs:
+        print("[skip] 10_organism_taxon_fix_before_after.png - no base tier has "
+              "both a pre-fix and a _v2 full_metrics.json present")
+        return
+
+    fig, axes = plt.subplots(1, len(pairs), figsize=(6 * len(pairs), 5.5), squeeze=False)
+    axes = axes[0]
+
+    for ax, (pre_id, fixed_id) in zip(axes, pairs):
+        pre, fixed = by_id[pre_id], by_id[fixed_id]
+        overall_pre = pre["strict"]["f1"] * 100
+        overall_fixed = fixed["strict"]["f1"] * 100
+        organism_pre = pre.get("per_type_strict", {}).get("OrganismTaxon", {}).get("f1", 0) * 100
+        organism_fixed = fixed.get("per_type_strict", {}).get("OrganismTaxon", {}).get("f1", 0) * 100
+
+        labels = ["Overall\n(strict F1)", "OrganismTaxon\n(strict F1)"]
+        pre_vals = [overall_pre, organism_pre]
+        fixed_vals = [overall_fixed, organism_fixed]
+
+        x = np.arange(len(labels))
+        width = 0.35
+        ax.bar(x - width / 2, pre_vals, width, label="Pre-fix", color="#C44E52")
+        ax.bar(x + width / 2, fixed_vals, width, label="KB fix (v2)", color="#55A868")
+
+        for xi, pv, fv in zip(x, pre_vals, fixed_vals):
+            ax.text(xi - width / 2, pv + 1.5, f"{pv:.1f}", ha="center", fontsize=9)
+            ax.text(xi + width / 2, fv + 1.5, f"{fv:.1f}", ha="center", fontsize=9)
+            delta = fv - pv
+            color = "#2ca02c" if delta > 0 else "#C44E52"
+            ax.text(xi, max(pv, fv) + 9, f"{delta:+.1f}", ha="center", fontsize=9,
+                     fontweight="bold", color=color)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_ylim(0, 110)
+        ax.set_ylabel("F1")
+        base_label = DISPLAY_NAMES.get(pre_id, pre_id).replace(" (pre-fix)", "")
+        ax.set_title(base_label)
+        ax.legend(loc="upper left", fontsize=8)
+
+    fig.suptitle("Human-referent allowlist fix: before vs after")
+    plt.tight_layout()
+    path = out_dir / "10_organism_taxon_fix_before_after.png"
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[saved] {path}")
+
+
+def fig11_ood_generalisation(all_metrics: list[dict], out_dir: Path):
+    """For every out-of-distribution (*_bc5cdr) run, compares it against its
+    in-distribution counterpart (the _v2/fixed result if present, else the
+    plain result) on the entity types both datasets actually annotate."""
+    by_id = {d["_raw_name"]: d for d in all_metrics}
+    ood_runs = [d for d in all_metrics if d["_raw_name"].endswith("_bc5cdr")]
+
+    if not ood_runs:
+        print("[skip] 11_ood_*.png - no *_bc5cdr (or other OOD-suffixed) "
+              "full_metrics.json found")
+        return
+
+    for ood in ood_runs:
+        base = ood["_base_name"][:-len("_bc5cdr")] if ood["_base_name"].endswith("_bc5cdr") else ood["_base_name"]
+        in_dist = by_id.get(f"{base}_v2") or by_id.get(base)
+        if in_dist is None:
+            print(f"[skip] 11_ood_{base}_bc5cdr.png - no in-distribution "
+                  f"counterpart ('{base}' or '{base}_v2') found")
+            continue
+
+        shared_types = [
+            t for t in ENTITY_TYPES
+            if ood.get("per_type_strict", {}).get(t, {}).get("support", 0) > 0
+            and in_dist.get("per_type_strict", {}).get(t, {}).get("support", 0) > 0
+        ]
+        if not shared_types:
+            print(f"[skip] 11_ood_{base}_bc5cdr.png - no entity type has "
+                  f"nonzero support in both runs")
+            continue
+
+        in_f1 = [in_dist["per_type_strict"][t]["f1"] * 100 for t in shared_types]
+        ood_f1 = [ood["per_type_strict"][t]["f1"] * 100 for t in shared_types]
+
+        y = np.arange(len(shared_types))
+        height = 0.35
+
+        fig, ax = plt.subplots(figsize=(8, max(3, 0.8 * len(shared_types) + 1.5)))
+        ax.barh(y + height / 2, in_f1, height, label=display_name(in_dist["_raw_name"]), color="#4C72B0")
+        ax.barh(y - height / 2, ood_f1, height, label=display_name(ood["_raw_name"]), color="#DD8452")
+
+        for i, (a, b) in enumerate(zip(in_f1, ood_f1)):
+            ax.text(a + 1, y[i] + height / 2, f"{a:.1f}", va="center", fontsize=9)
+            ax.text(b + 1, y[i] - height / 2, f"{b:.1f}", va="center", fontsize=9)
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(shared_types)
+        ax.set_xlabel("Strict F1")
+        ax.set_xlim(0, 110)
+        ax.set_title("In-distribution (BioRED) vs out-of-distribution (BC5CDR)\n"
+                      "strict F1, entity types annotated in both datasets")
+        ax.set_xlim(0, 115)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=1, frameon=False)
+
+        plt.tight_layout()
+        path = out_dir / f"11_ood_{base}_bc5cdr.png"
+        plt.savefig(path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[saved] {path}")
 
 
 def main():
@@ -562,12 +693,18 @@ def main():
     print()
 
     if all_metrics:
-        fig01_results_summary(tier_level, out_dir)
-        fig02_per_type_heatmap(tier_level, out_dir)
-        fig03_precision_recall(tier_level, out_dir)
-        fig04_error_taxonomy(tier_level, out_dir)
+        canonical = resolve_canonical_tiers(tier_level)
+        print(f"[info] canonical (headline) tier set for figures 01-04: "
+              f"{', '.join(d['_raw_name'] for d in canonical)}\n")
+
+        fig01_results_summary(canonical, out_dir)
+        fig02_per_type_heatmap(canonical, out_dir)
+        fig03_precision_recall(canonical, out_dir)
+        fig04_error_taxonomy(canonical, out_dir)
         fig05_tier4_vs_extended(all_metrics, out_dir)
         fig06_ablation_breakdown(all_metrics, out_dir)
+        fig10_kb_fix_before_after(all_metrics, out_dir)
+        fig11_ood_generalisation(all_metrics, out_dir)
 
     if strict_results:
         fig07_strict_sanity_summary(strict_tier_level, out_dir)

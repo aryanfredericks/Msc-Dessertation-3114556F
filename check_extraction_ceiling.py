@@ -1,23 +1,3 @@
-"""
-check_extraction_ceiling.py
-
-Measures the span-extraction recall ceiling for a given entity type: what
-fraction of gold mentions are ever generated as a candidate span by
-PubMedBERT's extract_spans_with_bert(), before any downstream branch
-(common/pattern/rare, or Tier 5's agent) gets a chance to type them.
-
-This directly tests whether OrganismTaxon's low recall (34-35% across both
-Tier 4 and Tier 5, despite very different arbitration strategies) is an
-extraction-stage bottleneck rather than a typing/arbitration-stage one -
-if a gold mention was never extracted as a candidate, no downstream branch
-can possibly recover it, regardless of how it's arbitrated.
-
-Usage:
-    PYTHONPATH=. uv run check_extraction_ceiling.py --type OrganismTaxon
-    PYTHONPATH=. uv run check_extraction_ceiling.py --type CellLine
-    PYTHONPATH=. uv run check_extraction_ceiling.py --type SequenceVariant
-"""
-
 import argparse
 import torch
 from transformers import AutoTokenizer, AutoModelForTokenClassification

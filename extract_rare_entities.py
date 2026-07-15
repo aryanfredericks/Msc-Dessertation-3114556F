@@ -1,24 +1,3 @@
-"""
-extract_rare_entities.py
-
-Pulls every gold OrganismTaxon and CellLine entity out of the BioRED test
-set, for inspecting whether resolve_rare_entity()'s sequential
-Cellosaurus-then-NCBI-Taxonomy ordering is misclassifying spans that should
-go to the other type.
-
-Writes two files:
-  - a JSON file, doc-grouped, same shape as your canonical gold format
-    (useful for joining back against predictions/entity_log later)
-  - a flat .txt file of unique surface strings per type, one per line
-    (useful for feeding straight into a curl/API-testing loop)
-
-Usage:
-    PYTHONPATH=. uv run extract_rare_entities.py \
-        --test_json ./dataset/test/Test.BioC.JSON \
-        --out outputs/rare_entity_analysis/organism_cellline_gold.json \
-        --txt_out outputs/rare_entity_analysis/organism_cellline_spans.txt
-"""
-
 import json
 import argparse
 from pathlib import Path

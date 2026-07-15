@@ -1,31 +1,4 @@
-"""Tier 3 - single-call LLM NER on BioRED (the orchestration-free control).
 
-One Groq chat completion per document (JSON mode, temperature 0). The LLM returns
-surface strings + types; this script maps each surface string back to character
-offsets deterministically (LLMs cannot count characters reliably). Same canonical
-output + scorer as Tiers 1-2.
-
-Built for tight free-tier limits (e.g. llama-3.1-8b-instant: 6K tokens/min,
-500K/day). Paces requests ADAPTIVELY from real per-response token usage to stay
-under the per-minute token budget, backs off on rate-limit errors, and
-checkpoints each document to JSONL so an interrupted run RESUMES.
-
-Setup:
-  pip install -r requirements.txt
-  export GROQ_API_KEY=...
-
-Run zero-shot (cheap; do this for the mean+/-std headline):
-  PYTHONPATH=. python tier3_llm/predict.py --test_json ./dataset/test/Test.BioC.JSON \
-    --shots 0 --output_dir outputs/tier3_llm_0shot
-
-Run few-shot (heavier; one full run ~1h under 6K tpm):
-  PYTHONPATH=. python tier3_llm/predict.py --test_json ./dataset/test/Test.BioC.JSON \
-    --example_json ./dataset/train/Train.BioC.JSON --shots 3 \
-    --output_dir outputs/tier3_llm_3shot
-
-If a run stops, RERUN the same command - it resumes from the checkpoint.
-Delete <output_dir>/checkpoint.jsonl to start fresh.
-"""
 import argparse
 import json
 import os

@@ -1,22 +1,3 @@
-"""
-check_ncbi_coverage.py
-
-Reads organism_cellline_spans.txt (from extract_rare_entities.py) and tests
-every unique gold OrganismTaxon span against the real NCBI Taxonomy API,
-using the exact same query as lookup_ncbi_taxonomy() in rare_agent_utils.py.
-
-Given check_extraction_ceiling.py showed OrganismTaxon spans ARE being
-extracted as candidates 99.5% of the time, but only ~34% end up correctly
-typed, the failure must be downstream of extraction. This tests the most
-likely explanation: NCBI Taxonomy is a species/organism-name database and
-may not have entries for colloquial human-referent terms BioRED annotates
-as OrganismTaxon (e.g. "patient", "men", "women") even though they
-correctly refer to Homo sapiens in context.
-
-Usage:
-    python check_ncbi_coverage.py --spans_file outputs/rare_entity_analysis/organism_cellline_spans.txt
-"""
-
 import argparse
 import os
 import time

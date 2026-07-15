@@ -156,7 +156,6 @@ def main():
     print(f"[build] wrote {out_path}")
     print(f"[build] {n_docs} documents, {n_entities} entities")
 
-    # --- verification: reconstruct doc_text and check every annotation offset ---
     print("\n[verify] checking all annotation offsets against reconstructed doc_text...")
     checked = 0
     mismatches = 0

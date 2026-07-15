@@ -1,13 +1,3 @@
-"""
-analyze_branch_stats.py
-
-Computes branch-resolution distribution from an entity_log_<timestamp>.jsonl
-file produced by AgentWorkflow.save_stats().
-
-Usage:
-    python analyze_branch_stats.py path/to/entity_log_20260707_120000.jsonl
-"""
-
 import json
 import sys
 import csv

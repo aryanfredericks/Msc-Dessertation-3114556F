@@ -1,19 +1,3 @@
-"""
-check_rare_collisions.py
-
-Reads the organism_cellline_spans.txt produced by extract_rare_entities.py
-and tests every gold OrganismTaxon span against the Cellosaurus API using
-the exact same exact-match logic as lookup_cellosaurus() in
-rare_agent_utils.py. Since resolve_rare_entity() checks Cellosaurus FIRST
-and only falls through to NCBI Taxonomy if that returns no match, any
-OrganismTaxon span that DOES get a Cellosaurus exact match is being
-misrouted before NCBI Taxonomy ever gets a chance - this directly tests
-that hypothesis.
-
-Usage:
-    python check_rare_collisions.py --spans_file outputs/rare_entity_analysis/organism_cellline_spans.txt
-"""
-
 import argparse
 import time
 import requests

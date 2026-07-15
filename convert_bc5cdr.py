@@ -1,35 +1,7 @@
-"""
-convert_bc5cdr.py
-
-Parses BC5CDR PubTator-format files (downloaded by download_bc5cdr.py) into
-the same document format used for BioRED elsewhere in this project:
-
-    { "<doc_id>": [{"start": 123, "end": 130, "type": "ChemicalEntity", "text": "aspirin"}, ...] }
-
-Also writes a companion doc_text json mapping doc_id -> full document text
-(title + " " + abstract), since PubTator annotation offsets are indexed
-into that exact concatenation (verified against the raw corpus - single
-space joiner, not newline). Your existing find_occurrences / offset
-localisation logic depends on having this exact string to index into.
-
-PubTator format reference:
-    <PMID>|t|<title>
-    <PMID>|a|<abstract>
-    <PMID><TAB>start<TAB>end<TAB>mention_text<TAB>type<TAB>id[|id...][<TAB>individual_mentions]
-    <PMID><TAB>CID<TAB>chem_id<TAB>disease_id      (relation lines - ignored here, NER only)
-    <blank line separates documents>
-
-Usage:
-    python convert_bc5cdr.py --split test
-    python convert_bc5cdr.py --split train --raw_dir ./datasets/bc5cdr/raw --out_dir ./datasets/bc5cdr/processed
-"""
-
 import json
 import argparse
 from pathlib import Path
 
-# PubTator label -> BioRED label (only Chemical/Disease exist in BC5CDR;
-# this is exactly the subset common_relation_agent is scoped to, minus Gene)
 TYPE_MAP = {
     "Chemical": "ChemicalEntity",
     "Disease": "DiseaseOrPhenotypicFeature",

@@ -1,15 +1,4 @@
-"""Tier 1 - fine-tune PubMedBERT for BioRED NER (token classification).
 
-Run:
-  python train.py \
-    --train_json /path/to/data/train/Train.BioC.JSON \
-    --dev_json   /path/to/data/dev/Dev.BioC.JSON \
-    --output_dir outputs/tier1_pubmedbert
-
-Outputs:
-  outputs/tier1_pubmedbert/model/            fine-tuned model + tokenizer
-  outputs/tier1_pubmedbert/dev_metrics.json  seqeval dev metrics (strict, BIO)
-"""
 import argparse
 import json
 import os

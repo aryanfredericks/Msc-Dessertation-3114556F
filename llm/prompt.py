@@ -1,9 +1,4 @@
-"""Tier 3 - prompt construction for single-call LLM NER.
 
-The type descriptions are this tier's "label phrasing knob" (the analogue of
-Tier 2's LABEL_PHRASES): a crisp gloss of what each type includes/excludes
-measurably changes results. Tune the wordings on dev, never test.
-"""
 import json
 
 from biored import CANONICAL_TYPES, load_biored_documents

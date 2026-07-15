@@ -1,19 +1,3 @@
-"""
-download_bc5cdr.py
-
-Downloads the official BC5CDR corpus (PubTator format) from the JHnlp
-mirror on GitHub and extracts it into ./datasets/bc5cdr/raw.
-
-We use this instead of the `datasets` library / bigbio hub repo because
-bigbio/bc5cdr relies on a legacy HF "loading script", which datasets>=4.0
-no longer supports at all (not just the trust_remote_code flag - script
-execution was removed). Going straight to the source PubTator files
-sidesteps that entirely and is more future-proof.
-
-Usage:
-    python download_bc5cdr.py
-"""
-
 import zipfile
 import urllib.request
 from pathlib import Path

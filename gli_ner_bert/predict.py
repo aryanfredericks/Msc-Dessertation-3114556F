@@ -12,9 +12,6 @@ from biored import (
     write_canonical,
 )
 
-# GLiNER reads label names as natural language, so the BioRED type strings are
-# given human phrasings. The value is the canonical BioRED type used everywhere
-# else. EDIT THESE PHRASINGS - they change the score; tune on dev.
 LABEL_PHRASES = {
     "gene or gene product": "GeneOrGeneProduct",
     "disease or phenotypic feature": "DiseaseOrPhenotypicFeature",
