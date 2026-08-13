@@ -14,8 +14,6 @@ wheels/
 outputs/
 output/
 
-report_figures/
-
 .claude/
 
 main.tex
